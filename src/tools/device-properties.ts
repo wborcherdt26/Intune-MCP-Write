@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
-import { textResult, errorResult } from "./errors.js";
+import { textResult, errorResult, paginationHeader } from "./errors.js";
 
 interface ManagedDevice {
   id: string;
@@ -26,6 +26,12 @@ interface ManagedDevice {
   azureADDeviceId: string;
   notes: string;
   deviceCategoryDisplayName: string;
+}
+
+interface DeviceCategory {
+  id: string;
+  displayName: string;
+  description: string;
 }
 
 const DEVICE_SELECT = [
@@ -72,7 +78,7 @@ export function registerDevicePropertyTools(
 ): void {
   server.tool(
     "list_devices",
-    "List managed devices in Intune. Returns device name, user, OS, compliance state, and sync status. Use $filter for OData filtering (e.g. operatingSystem eq 'Windows').",
+    "List managed devices in Intune. Returns device name, user, OS, compliance state, and sync status. Use $filter for OData filtering (e.g. operatingSystem eq 'Windows'). Supports cursor-based pagination for large result sets.",
     {
       filter: z
         .string()
@@ -92,18 +98,23 @@ export function registerDevicePropertyTools(
         .describe(
           "OData $orderby expression, e.g. \"deviceName\" or \"lastSyncDateTime desc\""
         ),
+      cursor: z
+        .string()
+        .optional()
+        .describe("Pagination cursor from a previous response to retrieve the next page of results"),
     },
-    async ({ filter, top, orderby }) => {
+    async ({ filter, top, orderby, cursor }) => {
       try {
         const params: Record<string, string> = { $select: DEVICE_SELECT };
         if (filter) params.$filter = filter;
         if (orderby) params.$orderby = orderby;
 
-        const { items, hasMore } = await graph.getAll<ManagedDevice>(
+        const { items, hasMore, nextCursor } = await graph.getAll<ManagedDevice>(
           "/deviceManagement/managedDevices",
           params,
           { tool: "list_devices" },
-          top ?? 25
+          top ?? 25,
+          cursor
         );
 
         if (items.length === 0) {
@@ -111,7 +122,7 @@ export function registerDevicePropertyTools(
         }
 
         const text = items.map(formatDevice).join("\n\n---\n\n");
-        const header = `Found ${items.length} device(s)${hasMore ? " (more available — increase top to retrieve more)" : ""}:\n\n`;
+        const header = paginationHeader(items.length, "device(s)", hasMore, nextCursor);
         return textResult(header + text);
       } catch (err) {
         return errorResult(err);
@@ -141,7 +152,9 @@ export function registerDevicePropertyTools(
 
   server.tool(
     "search_devices",
-    "Search for managed devices by device name, user principal name, or serial number.",
+    "Search for managed devices by device name, user principal name, or serial number. " +
+      "Uses server-side OData filters first, then falls back to client-side substring matching (capped at 200 devices). " +
+      "Set exactMatch to true to skip the client-side fallback.",
     {
       query: z
         .string()
@@ -154,15 +167,16 @@ export function registerDevicePropertyTools(
         .max(500)
         .optional()
         .describe("Maximum number of results (default 25, max 500)"),
+      exactMatch: z
+        .boolean()
+        .optional()
+        .describe("If true, only use server-side OData filters (no client-side fallback). Faster in large tenants."),
     },
-    async ({ query, top }) => {
+    async ({ query, top, exactMatch }) => {
       try {
         const escapedQuery = query.replace(/'/g, "''");
         const limit = top ?? 25;
 
-        // The managedDevices endpoint silently returns empty results when
-        // filter functions are combined with 'or'. Run each filter
-        // separately and stop at the first one that returns results.
         const filters = [
           `startsWith(deviceName,'${escapedQuery}')`,
           `startsWith(userPrincipalName,'${escapedQuery}')`,
@@ -186,17 +200,15 @@ export function registerDevicePropertyTools(
           }
         }
 
-        // Fallback: if server-side filters found nothing, fetch devices and
-        // filter client-side for substring and case-insensitive matches.
-        if (items.length === 0) {
+        if (items.length === 0 && !exactMatch) {
           const all = await graph.getAll<ManagedDevice>(
             "/deviceManagement/managedDevices",
             { $select: DEVICE_SELECT },
             { tool: "search_devices" },
-            1000
+            200
           );
 
-          const lowerQ = escapedQuery.toLowerCase();
+          const lowerQ = query.toLowerCase();
           const filtered = all.items.filter(
             (d) =>
               d.deviceName?.toLowerCase().includes(lowerQ) ||
@@ -341,6 +353,157 @@ export function registerDevicePropertyTools(
           `  Device: ${device.deviceName}\n` +
           `  Last sync before request: ${device.lastSyncDateTime}\n` +
           `  The device will check in on its next connection.`
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    }
+  );
+
+  server.tool(
+    "list_device_categories",
+    "List all device categories configured in Intune. Useful for finding the category name or ID before assigning a category to a device.",
+    {},
+    async () => {
+      try {
+        const { items } = await graph.getAll<DeviceCategory>(
+          "/deviceManagement/deviceCategories",
+          { $select: "id,displayName,description" },
+          { tool: "list_device_categories" },
+          100
+        );
+
+        if (items.length === 0) {
+          return textResult("No device categories are configured in this tenant.");
+        }
+
+        const lines = items.map(
+          (c) => `${c.displayName}\n  ID: ${c.id}\n  Description: ${c.description || "(none)"}`
+        );
+        return textResult(`${items.length} device category(ies):\n\n${lines.join("\n\n")}`);
+      } catch (err) {
+        return errorResult(err);
+      }
+    }
+  );
+
+  server.tool(
+    "update_device_category",
+    "Assign or change the device category for a managed device. Accepts the category by display name (resolved internally) or by category ID. " +
+      "WRITE OPERATION — this modifies the device record.",
+    {
+      deviceId: z.string().uuid().describe("The Intune managed device ID (GUID)"),
+      categoryName: z
+        .string()
+        .optional()
+        .describe("The display name of the device category (case-insensitive). Provide this OR categoryId."),
+      categoryId: z
+        .string()
+        .optional()
+        .describe("The device category ID (GUID). Provide this OR categoryName."),
+    },
+    async ({ deviceId, categoryName, categoryId }) => {
+      try {
+        if (!categoryName && !categoryId) {
+          return textResult("Provide either categoryName or categoryId.");
+        }
+
+        const device = await graph.get<ManagedDevice>(
+          `/deviceManagement/managedDevices/${deviceId}`,
+          { $select: "id,deviceName,deviceCategoryDisplayName" },
+          { tool: "update_device_category" }
+        );
+
+        let resolvedId = categoryId;
+        let resolvedName = categoryName;
+
+        if (!resolvedId && categoryName) {
+          const { items } = await graph.getAll<DeviceCategory>(
+            "/deviceManagement/deviceCategories",
+            { $select: "id,displayName" },
+            { tool: "update_device_category" },
+            100
+          );
+
+          const match = items.find(
+            (c) => c.displayName.toLowerCase() === categoryName.toLowerCase()
+          );
+
+          if (!match) {
+            const available = items.map((c) => c.displayName).join(", ");
+            return textResult(
+              `Category "${categoryName}" not found.\n` +
+              `  Available categories: ${available || "(none configured)"}`
+            );
+          }
+
+          resolvedId = match.id;
+          resolvedName = match.displayName;
+        }
+
+        await graph.put(
+          `/deviceManagement/managedDevices/${deviceId}/deviceCategory/$ref`,
+          { "@odata.id": `https://graph.microsoft.com/v1.0/deviceManagement/deviceCategories/${resolvedId}` },
+          { tool: "update_device_category" }
+        );
+
+        return textResult(
+          `Device category updated successfully.\n` +
+          `  Device: ${device.deviceName}\n` +
+          `  Previous category: ${device.deviceCategoryDisplayName || "(none)"}\n` +
+          `  New category: ${resolvedName ?? resolvedId}`
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    }
+  );
+
+  // --- Destructive: delete_device ---
+
+  if (process.env.ENABLE_DESTRUCTIVE_ACTIONS !== "true") return;
+
+  server.tool(
+    "delete_device",
+    "DESTRUCTIVE — Delete a managed device from Intune, removing it from management entirely. " +
+      "This does not wipe or retire the device — it only removes the Intune management record. " +
+      "Requires confirmDeviceName to match the device's actual name as a safety check. " +
+      "WRITE OPERATION — this action cannot be undone.",
+    {
+      deviceId: z.string().uuid().describe("The Intune managed device ID (GUID)"),
+      confirmDeviceName: z.string().describe(
+        "Must exactly match the device's display name. Fetch the device first to confirm the name."
+      ),
+    },
+    async ({ deviceId, confirmDeviceName }) => {
+      try {
+        const device = await graph.get<ManagedDevice>(
+          `/deviceManagement/managedDevices/${deviceId}`,
+          { $select: "id,deviceName,userPrincipalName,userDisplayName,operatingSystem,serialNumber" },
+          { tool: "delete_device" }
+        );
+
+        if (device.deviceName !== confirmDeviceName) {
+          return textResult(
+            `Safety check failed — device name does not match.\n` +
+            `  Expected: "${confirmDeviceName}"\n` +
+            `  Actual: "${device.deviceName}"\n` +
+            `  Fetch the device details first and use the exact device name.`
+          );
+        }
+
+        await graph.delete(
+          `/deviceManagement/managedDevices/${deviceId}`,
+          { tool: "delete_device" }
+        );
+
+        return textResult(
+          `Device deleted from Intune management.\n` +
+          `  Device: ${device.deviceName}\n` +
+          `  Serial: ${device.serialNumber}\n` +
+          `  OS: ${device.operatingSystem}\n` +
+          `  User: ${device.userDisplayName} (${device.userPrincipalName})\n` +
+          `  The device is no longer managed by Intune.`
         );
       } catch (err) {
         return errorResult(err);

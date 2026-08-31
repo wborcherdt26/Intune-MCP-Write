@@ -2,6 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GraphClient } from "./graph.js";
 import { registerDevicePropertyTools } from "./tools/device-properties.js";
 import { registerGroupMembershipTools } from "./tools/group-membership.js";
+import { registerRemoteActionTools } from "./tools/remote-actions.js";
+import { registerUserOperationTools } from "./tools/user-operations.js";
+import { registerBulkOperationTools } from "./tools/bulk-operations.js";
 
 export interface PackageInfo {
   name: string;
@@ -43,6 +46,9 @@ export function createMcpServer(pkg: PackageInfo, auth: AuthContext): McpServer 
 
   registerDevicePropertyTools(server, graph);
   registerGroupMembershipTools(server, graph);
+  registerRemoteActionTools(server, graph);
+  registerUserOperationTools(server, graph);
+  registerBulkOperationTools(server, graph);
 
   return server;
 }

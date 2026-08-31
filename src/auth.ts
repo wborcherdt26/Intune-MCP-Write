@@ -9,9 +9,11 @@ import * as os from "node:os";
 
 const SCOPES = [
   "DeviceManagementManagedDevices.ReadWrite.All",
+  "DeviceManagementManagedDevices.PrivilegedOperations.All",
   "Device.Read.All",
   "GroupMember.ReadWrite.All",
   "Directory.Read.All",
+  "User.Read.All",
 ];
 
 const CACHE_DIR = path.join(os.homedir(), ".intune-mcp-write");

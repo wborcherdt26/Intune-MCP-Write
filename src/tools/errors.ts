@@ -19,6 +19,12 @@ export function errorResult(err: unknown) {
   return { ...textResult(errorText(err)), isError: true as const };
 }
 
+export function paginationHeader(count: number, label: string, hasMore: boolean, nextCursor?: string): string {
+  const more = hasMore ? " (more available)" : "";
+  const cursor = nextCursor ? `\nNext page cursor: ${nextCursor}\n` : "";
+  return `${count} ${label}${more}:${cursor}\n`;
+}
+
 export function odataTypeLabel(
   odataType: string,
   labels: Record<string, string>

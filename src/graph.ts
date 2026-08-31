@@ -10,6 +10,7 @@ const MAX_PAGES = 10;
 export interface PaginatedResult<T> {
   items: T[];
   hasMore: boolean;
+  nextCursor?: string;
 }
 
 export class GraphClient {
@@ -40,18 +41,20 @@ export class GraphClient {
     path: string,
     params?: Record<string, string>,
     logContext?: LogContext,
-    maxItems: number = MAX_PAGE_SIZE
+    maxItems: number = MAX_PAGE_SIZE,
+    cursor?: string
   ): Promise<PaginatedResult<T>> {
-    return this.paginate("v1.0", path, params, logContext, maxItems);
+    return this.paginate("v1.0", path, params, logContext, maxItems, cursor);
   }
 
   async getAllBeta<T = unknown>(
     path: string,
     params?: Record<string, string>,
     logContext?: LogContext,
-    maxItems: number = MAX_PAGE_SIZE
+    maxItems: number = MAX_PAGE_SIZE,
+    cursor?: string
   ): Promise<PaginatedResult<T>> {
-    return this.paginate("beta", path, params, logContext, maxItems);
+    return this.paginate("beta", path, params, logContext, maxItems, cursor);
   }
 
   async patch<T = unknown>(
@@ -98,19 +101,36 @@ export class GraphClient {
     await this.requestUrl(url, "DELETE", path, "v1.0", logContext);
   }
 
+  async put<T = unknown>(
+    path: string,
+    body: unknown,
+    logContext?: LogContext
+  ): Promise<T | void> {
+    const url = this.buildUrl("v1.0", path);
+    return this.requestUrl(url, "PUT", path, "v1.0", logContext, body);
+  }
+
   private async paginate<T>(
     version: string,
     path: string,
     params: Record<string, string> | undefined,
     logContext: LogContext | undefined,
-    maxItems: number
+    maxItems: number,
+    cursor?: string
   ): Promise<PaginatedResult<T>> {
-    const pageSize = Math.min(maxItems, MAX_PAGE_SIZE);
-    const effectiveParams = { ...params, $top: String(pageSize) };
+    let firstUrl: string;
+    if (cursor) {
+      const decoded = decodeCursor(cursor);
+      firstUrl = decoded.url;
+      if (decoded.maxItems !== undefined) maxItems = decoded.maxItems;
+    } else {
+      const pageSize = Math.min(maxItems, MAX_PAGE_SIZE);
+      const effectiveParams = { ...params, $top: String(pageSize) };
+      firstUrl = this.buildUrl(version, path, effectiveParams);
+    }
 
-    const url = this.buildUrl(version, path, effectiveParams);
     const firstPage = await this.requestUrl<GraphPagedResponse<T>>(
-      url, "GET", path, version, logContext
+      firstUrl, "GET", path, version, logContext
     );
 
     const items = [...firstPage.value];
@@ -129,7 +149,10 @@ export class GraphClient {
     const truncated = items.length > maxItems;
     if (truncated) items.length = maxItems;
 
-    return { items, hasMore: !!nextLink || truncated };
+    const hasMore = !!nextLink || truncated;
+    const nextCursor = hasMore && nextLink ? encodeCursor(nextLink, maxItems) : undefined;
+
+    return { items, hasMore, nextCursor };
   }
 
   private buildUrl(
@@ -280,6 +303,28 @@ export class GraphClient {
     }
     return BASE_DELAY_MS * Math.pow(2, attempt - 1);
   }
+}
+
+function encodeCursor(nextLink: string, maxItems: number): string {
+  return Buffer.from(`${maxItems}\n${nextLink}`).toString("base64url");
+}
+
+function decodeCursor(cursor: string): { url: string; maxItems?: number } {
+  const decoded = Buffer.from(cursor, "base64url").toString();
+  const nlIdx = decoded.indexOf("\n");
+  if (nlIdx !== -1) {
+    const prefix = decoded.substring(0, nlIdx);
+    const url = decoded.substring(nlIdx + 1);
+    const maxItems = parseInt(prefix, 10);
+    if (!url.startsWith("https://graph.microsoft.com/")) {
+      throw new GraphError(0, "Invalid pagination cursor");
+    }
+    return { url, maxItems: Number.isFinite(maxItems) ? maxItems : undefined };
+  }
+  if (!decoded.startsWith("https://graph.microsoft.com/")) {
+    throw new GraphError(0, "Invalid pagination cursor");
+  }
+  return { url: decoded };
 }
 
 function parseRetryAfter(header: string | null): number | undefined {

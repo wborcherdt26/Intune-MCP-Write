@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
-import { textResult, errorResult } from "./errors.js";
+import { textResult, errorResult } from "./shared.js";
 
 const DEFAULT_PACING_MS = 200;
 const MAX_ITEMS = 50;

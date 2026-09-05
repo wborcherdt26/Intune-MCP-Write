@@ -92,6 +92,24 @@ describe("list_device_categories", () => {
 
     expect(getText(result)).toContain("No device categories");
   });
+
+  it("returns a compact one-liner per category when format is compact", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.getAll.mockResolvedValueOnce({
+      items: [
+        { id: "cat-1", displayName: "Corporate Laptops", description: "Company-issued laptops" },
+      ],
+      hasMore: false,
+    });
+    delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
+    registerDevicePropertyTools(server as never, graph as never);
+
+    const handler = server.getHandler("list_device_categories");
+    const result = await handler({ format: "compact" });
+
+    expect(getText(result)).toContain("Corporate Laptops | cat-1 | Company-issued laptops");
+  });
 });
 
 describe("update_device_category", () => {

@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
-import { textResult, errorResult } from "./errors.js";
+import { textResult, errorResult, sanitizeSearchQuery, formatList, odataTypeLabel } from "./shared.js";
 
-interface AadGroup {
+export interface AadGroup {
   id: string;
   displayName: string;
   description: string;
@@ -14,7 +14,7 @@ interface AadGroup {
   securityEnabled: boolean;
 }
 
-interface AadDevice {
+export interface AadDevice {
   id: string;
   displayName: string;
   deviceId: string;
@@ -24,16 +24,25 @@ interface AadDevice {
   trustType: string;
 }
 
-interface DirectoryObject {
+export interface DirectoryObject {
   "@odata.type": string;
   id: string;
   displayName?: string;
   userPrincipalName?: string;
   deviceId?: string;
   operatingSystem?: string;
+  operatingSystemVersion?: string;
+  accountEnabled?: boolean;
 }
 
-function formatGroup(g: AadGroup): string {
+const MEMBER_SELECT = "id,displayName,userPrincipalName,deviceId,operatingSystem,operatingSystemVersion,accountEnabled";
+
+const MEMBER_TYPE_LABELS: Record<string, string> = {
+  "#microsoft.graph.device": "Device",
+  "#microsoft.graph.user": "User",
+};
+
+export function formatGroup(g: AadGroup): string {
   const isDynamic = g.groupTypes?.includes("DynamicMembership");
   const lines = [
     `Group: ${g.displayName}`,
@@ -48,6 +57,11 @@ function formatGroup(g: AadGroup): string {
   return lines.join("\n");
 }
 
+export function formatGroupCompact(g: AadGroup): string {
+  const isDynamic = g.groupTypes?.includes("DynamicMembership");
+  return `${g.displayName} | ${g.id} | ${isDynamic ? "Dynamic" : "Assigned"}`;
+}
+
 function formatAadDevice(d: AadDevice): string {
   return [
     `Device: ${d.displayName}`,
@@ -59,13 +73,34 @@ function formatAadDevice(d: AadDevice): string {
   ].join("\n");
 }
 
-function formatMember(m: DirectoryObject): string {
-  const type = m["@odata.type"]?.replace("#microsoft.graph.", "") ?? "unknown";
-  if (type === "device") {
+export function formatMemberCompact(m: DirectoryObject): string {
+  const type = odataTypeLabel(m["@odata.type"], MEMBER_TYPE_LABELS);
+  if (type === "Device") {
     return `[Device] ${m.displayName} (ID: ${m.id}, DeviceID: ${m.deviceId ?? "N/A"})`;
   }
-  if (type === "user") {
+  if (type === "User") {
     return `[User] ${m.displayName} (${m.userPrincipalName ?? m.id})`;
+  }
+  return `[${type}] ${m.displayName ?? m.id}`;
+}
+
+export function formatMember(m: DirectoryObject): string {
+  const type = odataTypeLabel(m["@odata.type"], MEMBER_TYPE_LABELS);
+  if (type === "Device") {
+    return [
+      `[Device] ${m.displayName}`,
+      `  ID: ${m.id}`,
+      `  Device ID: ${m.deviceId ?? "N/A"}`,
+      `  OS: ${m.operatingSystem ?? "N/A"} ${m.operatingSystemVersion ?? ""}`.trim(),
+    ].join("\n");
+  }
+  if (type === "User") {
+    return [
+      `[User] ${m.displayName}`,
+      `  ID: ${m.id}`,
+      `  UPN: ${m.userPrincipalName ?? m.id}`,
+      `  Account Enabled: ${m.accountEnabled ?? "N/A"}`,
+    ].join("\n");
   }
   return `[${type}] ${m.displayName ?? m.id}`;
 }
@@ -89,7 +124,99 @@ async function resolveToUserId(
   }
 }
 
-async function resolveToObjectId(
+const AAD_GROUP_SELECT = "id,displayName,description,groupTypes,membershipRule,membershipRuleProcessingState,mailEnabled,securityEnabled";
+
+export async function fetchGroup(
+  graph: GraphClient,
+  groupId: string,
+  toolName: string
+): Promise<AadGroup> {
+  return graph.get<AadGroup>(
+    `/groups/${groupId}`,
+    { $select: AAD_GROUP_SELECT },
+    { tool: toolName }
+  );
+}
+
+export async function listGroupMembersInternal(
+  graph: GraphClient,
+  groupId: string,
+  toolName: string,
+  limit: number
+): Promise<{ items: DirectoryObject[]; hasMore: boolean }> {
+  return graph.getAll<DirectoryObject>(
+    `/groups/${groupId}/members`,
+    { $select: MEMBER_SELECT },
+    { tool: toolName },
+    limit
+  );
+}
+
+export async function listDeviceGroupsInternal(
+  graph: GraphClient,
+  objectId: string,
+  toolName: string,
+  limit: number
+): Promise<{ items: AadGroup[]; hasMore: boolean }> {
+  const { items, hasMore } = await graph.getAll<AadGroup>(
+    `/devices/${objectId}/memberOf`,
+    { $select: AAD_GROUP_SELECT },
+    { tool: toolName },
+    limit
+  );
+
+  const groups = items.filter(
+    (m) => (m as unknown as DirectoryObject)["@odata.type"] === "#microsoft.graph.group"
+  );
+
+  return { items: groups, hasMore };
+}
+
+export async function searchGroupsInternal(
+  graph: GraphClient,
+  query: string,
+  limit: number,
+  exactMatch?: boolean
+): Promise<{ items: AadGroup[]; hasMore: boolean }> {
+  const sanitized = sanitizeSearchQuery(query);
+
+  let { items, hasMore } = await graph.getAll<AadGroup>(
+    "/groups",
+    {
+      $filter: `startsWith(displayName,'${sanitized}')`,
+      $select: AAD_GROUP_SELECT,
+    },
+    { tool: "search_groups" },
+    limit
+  );
+
+  if (items.length === 0 && !exactMatch) {
+    const all = await graph.getAll<AadGroup>(
+      "/groups",
+      {
+        $select: AAD_GROUP_SELECT,
+        $orderby: "displayName",
+      },
+      { tool: "search_groups" },
+      200
+    );
+
+    // Use the original query (not the OData-escaped `sanitized` value) for client-side
+    // matching — escaping doubles apostrophes, which breaks .includes() for names like
+    // "O'Brien" (see v1.3.1 fix for this same bug in search_devices/search_groups/search_users).
+    const lowerQ = query.toLowerCase();
+    const filtered = all.items.filter(
+      (g) => g.displayName?.toLowerCase().includes(lowerQ)
+    );
+
+    items = filtered.slice(0, limit);
+    hasMore = filtered.length > limit;
+  }
+
+  return { items, hasMore };
+}
+
+export async function resolveToObjectId(
   graph: GraphClient,
   idValue: string,
   toolName: string
@@ -173,49 +300,21 @@ export function registerGroupMembershipTools(
         .boolean()
         .optional()
         .describe("If true, only use server-side OData filters (no client-side fallback). Faster in large tenants."),
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' = one line per item, 'full' (default) = all fields"),
     },
-    async ({ query, top, exactMatch }) => {
+    async ({ query, top, exactMatch, format }) => {
       try {
-        const escapedQuery = query.replace(/'/g, "''");
         const limit = top ?? 25;
-
-        let { items, hasMore } = await graph.getAll<AadGroup>(
-          "/groups",
-          {
-            $filter: `startsWith(displayName,'${escapedQuery}')`,
-            $select: "id,displayName,description,groupTypes,membershipRule,membershipRuleProcessingState,mailEnabled,securityEnabled",
-          },
-          { tool: "search_groups" },
-          limit
-        );
-
-        if (items.length === 0 && !exactMatch) {
-          const all = await graph.getAll<AadGroup>(
-            "/groups",
-            {
-              $select: "id,displayName,description,groupTypes,membershipRule,membershipRuleProcessingState,mailEnabled,securityEnabled",
-              $orderby: "displayName",
-            },
-            { tool: "search_groups" },
-            200
-          );
-
-          const lowerQ = query.toLowerCase();
-          const filtered = all.items.filter(
-            (g) => g.displayName?.toLowerCase().includes(lowerQ)
-          );
-
-          items = filtered.slice(0, limit);
-          hasMore = filtered.length > limit;
-        }
+        const { items, hasMore } = await searchGroupsInternal(graph, query, limit, exactMatch);
 
         if (items.length === 0) {
           return textResult(`No groups found matching "${query}".`);
         }
 
-        const text = items.map(formatGroup).join("\n\n");
+        const fmt = format === "compact" ? formatGroupCompact : formatGroup;
         const header = `Found ${items.length} group(s) matching "${query}"${hasMore ? " (more available)" : ""}:\n\n`;
-        return textResult(header + text);
+        return textResult(header + formatList(items.map(fmt), format ?? "full"));
       } catch (err) {
         return errorResult(err);
       }
@@ -233,29 +332,22 @@ export function registerGroupMembershipTools(
         .max(500)
         .optional()
         .describe("Maximum number of members to return (default 100, max 500)"),
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' (default) = one line per item, 'full' = adds account status and OS version"),
     },
-    async ({ groupId, top }) => {
+    async ({ groupId, top, format }) => {
       try {
-        const group = await graph.get<AadGroup>(
-          `/groups/${groupId}`,
-          { $select: "id,displayName" },
-          { tool: "list_group_members" }
-        );
+        const group = await fetchGroup(graph, groupId, "list_group_members");
 
-        const { items, hasMore } = await graph.getAll<DirectoryObject>(
-          `/groups/${groupId}/members`,
-          { $select: "id,displayName,userPrincipalName,deviceId,operatingSystem" },
-          { tool: "list_group_members" },
-          top ?? 100
-        );
+        const { items, hasMore } = await listGroupMembersInternal(graph, groupId, "list_group_members", top ?? 100);
 
         if (items.length === 0) {
           return textResult(`Group "${group.displayName}" has no members.`);
         }
 
-        const lines = items.map(formatMember);
+        const fmt = format === "full" ? formatMember : formatMemberCompact;
         const header = `Members of "${group.displayName}" (${items.length}${hasMore ? "+" : ""}):\n\n`;
-        return textResult(header + lines.join("\n"));
+        return textResult(header + formatList(items.map(fmt), format === "full" ? "full" : "compact"));
       } catch (err) {
         return errorResult(err);
       }
@@ -312,11 +404,7 @@ export function registerGroupMembershipTools(
     async ({ groupId, deviceId }) => {
       try {
         const [group, resolved] = await Promise.all([
-          graph.get<AadGroup>(
-            `/groups/${groupId}`,
-            { $select: "id,displayName,groupTypes,membershipRule" },
-            { tool: "add_device_to_group" }
-          ),
+          fetchGroup(graph, groupId, "add_device_to_group"),
           resolveToObjectId(graph, deviceId, "add_device_to_group"),
         ]);
 
@@ -358,11 +446,7 @@ export function registerGroupMembershipTools(
     async ({ groupId, deviceId }) => {
       try {
         const [group, resolved] = await Promise.all([
-          graph.get<AadGroup>(
-            `/groups/${groupId}`,
-            { $select: "id,displayName,groupTypes" },
-            { tool: "remove_device_from_group" }
-          ),
+          fetchGroup(graph, groupId, "remove_device_from_group"),
           resolveToObjectId(graph, deviceId, "remove_device_from_group"),
         ]);
 
@@ -403,8 +487,10 @@ export function registerGroupMembershipTools(
         .max(500)
         .optional()
         .describe("Maximum number of groups to return (default 100, max 500)"),
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' = one line per item, 'full' (default) = all fields"),
     },
-    async ({ deviceId, top }) => {
+    async ({ deviceId, top, format }) => {
       try {
         const resolved = await resolveToObjectId(graph, deviceId, "list_device_groups");
 
@@ -414,24 +500,15 @@ export function registerGroupMembershipTools(
           { tool: "list_device_groups" }
         );
 
-        const { items, hasMore } = await graph.getAll<AadGroup>(
-          `/devices/${resolved.objectId}/memberOf`,
-          { $select: "id,displayName,description,groupTypes,membershipRule,membershipRuleProcessingState,mailEnabled,securityEnabled" },
-          { tool: "list_device_groups" },
-          top ?? 100
-        );
-
-        const groups = items.filter(
-          (m) => (m as unknown as DirectoryObject)["@odata.type"] === "#microsoft.graph.group"
-        );
+        const { items: groups, hasMore } = await listDeviceGroupsInternal(graph, resolved.objectId, "list_device_groups", top ?? 100);
 
         if (groups.length === 0) {
           return textResult(`Device "${device.displayName}" is not a member of any groups.`);
         }
 
-        const text = groups.map(formatGroup).join("\n\n");
+        const fmt = format === "compact" ? formatGroupCompact : formatGroup;
         const header = `Device "${device.displayName}" is a member of ${groups.length} group(s)${hasMore ? " (more available)" : ""}:\n\n`;
-        return textResult(header + text);
+        return textResult(header + formatList(groups.map(fmt), format ?? "full"));
       } catch (err) {
         return errorResult(err);
       }
@@ -452,11 +529,7 @@ export function registerGroupMembershipTools(
     async ({ groupId, userId }) => {
       try {
         const [group, resolved] = await Promise.all([
-          graph.get<AadGroup>(
-            `/groups/${groupId}`,
-            { $select: "id,displayName,groupTypes,membershipRule" },
-            { tool: "add_user_to_group" }
-          ),
+          fetchGroup(graph, groupId, "add_user_to_group"),
           resolveToUserId(graph, userId, "add_user_to_group"),
         ]);
 
@@ -498,11 +571,7 @@ export function registerGroupMembershipTools(
     async ({ groupId, userId }) => {
       try {
         const [group, resolved] = await Promise.all([
-          graph.get<AadGroup>(
-            `/groups/${groupId}`,
-            { $select: "id,displayName,groupTypes" },
-            { tool: "remove_user_from_group" }
-          ),
+          fetchGroup(graph, groupId, "remove_user_from_group"),
           resolveToUserId(graph, userId, "remove_user_from_group"),
         ]);
 

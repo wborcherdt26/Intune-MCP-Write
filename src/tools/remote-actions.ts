@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
-import { textResult, errorResult } from "./errors.js";
+import { textResult, errorResult, isDestructiveActionsEnabled } from "./shared.js";
 
 interface ManagedDeviceSummary {
   id: string;
@@ -18,10 +18,6 @@ const DEVICE_SUMMARY_SELECT = [
   "id", "deviceName", "operatingSystem", "osVersion",
   "userPrincipalName", "userDisplayName", "managementAgent", "lastSyncDateTime",
 ].join(",");
-
-function destructiveActionsEnabled(): boolean {
-  return process.env.ENABLE_DESTRUCTIVE_ACTIONS === "true";
-}
 
 export function registerRemoteActionTools(
   server: McpServer,
@@ -158,7 +154,7 @@ export function registerRemoteActionTools(
 
   // --- Destructive actions (gated by ENABLE_DESTRUCTIVE_ACTIONS) ---
 
-  if (!destructiveActionsEnabled()) return;
+  if (!isDestructiveActionsEnabled()) return;
 
   server.tool(
     "retire_device",

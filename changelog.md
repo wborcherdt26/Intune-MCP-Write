@@ -4,6 +4,125 @@ Record of changes, decisions, and releases for the Intune Admin MCP Server (writ
 
 ---
 
+## 2026-09-05 — v1.5.0: Token Efficiency: Compact Format & Compound Operations
+
+### Summary
+
+Ported the token-efficiency practices from Intune MCP (read, v1.7.0/v1.7.1) — compact/full output
+formatting on list/search tools and compound "overview" tools that collapse multi-call chains into
+one — adapted to this repo's write-capable tool surface. Also fixed a reintroduced instance of the
+v1.3.1 apostrophe-escaping bug caught during the port, and closed several existing test gaps on the
+tools this change touches.
+
+### Compact Format Foundation
+
+- Renamed `src/tools/errors.ts` → `shared.ts` (mirrors the read repo's v1.5.2 rename).
+- Added `ResponseFormat` type, `formatList()`, and `sanitizeSearchQuery()` (control-character
+  stripping + 255-character cap, in addition to the existing quote-escaping) to `shared.ts`.
+- Fixed `odataTypeLabel()` to guard against `undefined` input (returns `"Unknown"` instead of
+  throwing) — the same bug the read repo fixed in its v1.7.1. Note: this changes the missing-type
+  fallback text of `formatMember()` (now routed through `odataTypeLabel()` instead of a duplicate
+  inline implementation) from lowercase `"unknown"` to `"Unknown"`.
+- Added `isDestructiveActionsEnabled()` to `shared.ts`, replacing two independent duplicate
+  implementations of the same `ENABLE_DESTRUCTIVE_ACTIONS` check in `device-properties.ts` and
+  `remote-actions.ts`.
+- Added optional `format: "compact"|"full"` to `list_devices`, `search_devices`,
+  `list_device_categories`, `search_groups`, `list_group_members`, `list_device_groups`, and
+  `search_users`. `list_group_members` defaults to `"compact"` (today's one-line-per-member
+  output); `"full"` adds account status and OS version per member. All others default to `"full"`.
+- Consolidated 5 duplicated inline `GET /groups/{id}` calls in `group-membership.ts` into one
+  `fetchGroup()` helper, standardized on the full `AadGroup` `$select` (a couple of call sites now
+  fetch a few previously-unfetched fields — harmless, just a wider select). A 6th copy in
+  `bulk-operations.ts`'s `bulk_group_add` was left as-is — out of scope for this change.
+- Switched `search_devices`/`search_groups`/`search_users` to use `sanitizeSearchQuery()` for
+  OData filter escaping.
+
+### Compound Tools
+
+New `src/tools/compound.ts`, adapted to this repo's tool surface rather than a literal port — the
+read repo has no group-membership concept, so `get_device_overview` here combines device details +
+resolved Azure AD object ID + group memberships, not device + compliance + config profiles:
+
+- **`get_device_overview`** — Device details + resolved Azure AD object ID + group memberships in
+  one call. Replaces `get_device` → `resolve_device_object_id` → `list_device_groups`.
+- **`search_device_overview`** — Search for a device, auto-expand to full overview on exactly one
+  match, compact disambiguation list otherwise.
+- **`get_group_overview`** — Group metadata + members in one call.
+- **`search_group_overview`** — Same auto-expand pattern for groups.
+
+All 4 default `format` to `"compact"`. Supporting refactors: `searchDevicesInternal()` extracted
+from `search_devices`, `searchGroupsInternal()` extracted from `search_groups`,
+`listDeviceGroupsInternal()`/`listGroupMembersInternal()` extracted from `list_device_groups`/
+`list_group_members` — each now shared between its standalone tool and the compound tools instead
+of being duplicated.
+
+### Bug Fix — Regression Caught During This Port
+
+- Porting `sanitizeSearchQuery()` into `searchDevicesInternal()`/`searchGroupsInternal()` initially
+  reintroduced the exact bug fixed in v1.3.1: using the OData-escaped (quote-doubled) query for the
+  client-side substring fallback, which breaks matching for names containing apostrophes (e.g.
+  "O'Brien"). Caught before release; both functions now use the original unescaped query for
+  client-side matching, matching the v1.3.1 fix. Added regression tests for both.
+
+### Test Coverage
+
+- New `src/__tests__/compound.test.ts` (10 tests) for the 4 compound tools, same mocked-handler
+  pattern as the rest of this suite.
+- New `src/__tests__/device-properties.test.ts` (6 tests) — `list_devices`/`search_devices` had no
+  prior coverage at all.
+- Added `format` compact/full assertions to `search_users` (`user-operations.test.ts`) and
+  `list_device_categories` (`device-properties-extended.test.ts`).
+- New `search_groups`/`list_group_members`/`list_device_groups` coverage in
+  `group-membership.test.ts` (previously untested) — 7 new tests, including the apostrophe
+  regression case.
+- Renamed `errors.test.ts` → `shared.test.ts`; added `odataTypeLabel(undefined, …)`,
+  `sanitizeSearchQuery()`, and `formatList()` cases.
+- 103 tests pass (was 71).
+
+### Live Validation
+
+New `scripts/validate-live.mjs` and `scripts/validate-mcp-client.mjs` (this repo had neither
+before — new additions, not ports), modeled on the read repo's scripts of the same name. **Hard
+safety rule:** both only ever call `list_*`/`search_*`/`get_*`/`resolve_*` tools and the 4 new
+compound tools against the real tenant, enforced by an explicit allowlist in `validate-live.mjs` —
+never `update_*`, `delete_device`, `restart_device`, `retire_device`, `wipe_device`, `sync_device`,
+`remote_lock_device`, `rotate_bitlocker_keys`, `add_*_to_group`/`remove_*_from_group`,
+`update_primary_user`, or any `bulk_*` tool. Write-path validation remains a manual,
+explicitly-approved exercise against a disposable test device — not something scripted.
+
+### File Structure (changes from v1.4.0)
+
+```
+src/
+  tools/shared.ts                 RENAMED from errors.ts — added ResponseFormat, formatList(),
+                                   sanitizeSearchQuery(), isDestructiveActionsEnabled(), guarded
+                                   odataTypeLabel()
+  tools/device-properties.ts      MODIFIED — format param on list_devices/search_devices/
+                                   list_device_categories, searchDevicesInternal() extracted,
+                                   exports ManagedDevice/DEVICE_SELECT/formatDevice
+  tools/group-membership.ts       MODIFIED — format param on search_groups/list_group_members/
+                                   list_device_groups, fetchGroup()/searchGroupsInternal()/
+                                   listDeviceGroupsInternal()/listGroupMembersInternal()
+                                   extracted, formatMember() routed through odataTypeLabel()
+  tools/remote-actions.ts         MODIFIED — uses shared isDestructiveActionsEnabled()
+  tools/user-operations.ts        MODIFIED — format param on search_users, uses
+                                   sanitizeSearchQuery()
+  tools/compound.ts               NEW — get_device_overview, search_device_overview,
+                                   get_group_overview, search_group_overview
+  server.ts                       MODIFIED — registers compound tools
+  __tests__/shared.test.ts        RENAMED from errors.test.ts — added 6 tests
+  __tests__/device-properties.test.ts   NEW — 6 tests
+  __tests__/compound.test.ts      NEW — 10 tests
+  __tests__/group-membership.test.ts    MODIFIED — added 7 tests
+  __tests__/user-operations.test.ts     MODIFIED — added 2 tests
+  __tests__/device-properties-extended.test.ts   MODIFIED — added 1 test
+scripts/validate-live.mjs         NEW
+scripts/validate-mcp-client.mjs   NEW
+package.json                      MODIFIED — v1.5.0
+```
+
+---
+
 ## 2026-08-31 — v1.4.0: User Group Management & Bulk Operations
 
 ### Summary

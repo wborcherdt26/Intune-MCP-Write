@@ -1,9 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
-import { textResult, errorResult, paginationHeader } from "./errors.js";
+import {
+  textResult,
+  errorResult,
+  paginationHeader,
+  sanitizeSearchQuery,
+  formatList,
+  isDestructiveActionsEnabled,
+} from "./shared.js";
 
-interface ManagedDevice {
+export interface ManagedDevice {
   id: string;
   deviceName: string;
   userPrincipalName: string;
@@ -34,7 +41,7 @@ interface DeviceCategory {
   description: string;
 }
 
-const DEVICE_SELECT = [
+export const DEVICE_SELECT = [
   "id", "deviceName", "userPrincipalName", "userDisplayName",
   "operatingSystem", "osVersion", "complianceState", "managementAgent",
   "enrolledDateTime", "lastSyncDateTime", "serialNumber", "model",
@@ -43,7 +50,7 @@ const DEVICE_SELECT = [
   "azureADRegistered", "azureADDeviceId", "notes", "deviceCategoryDisplayName",
 ].join(",");
 
-function formatDevice(d: ManagedDevice): string {
+export function formatDevice(d: ManagedDevice): string {
   const lines = [
     `Device: ${d.deviceName}`,
     `  ID: ${d.id}`,
@@ -72,6 +79,62 @@ function formatBytes(bytes: number): string {
   return (bytes / Math.pow(1024, i)).toFixed(1) + " " + units[i];
 }
 
+export function formatDeviceCompact(d: ManagedDevice): string {
+  return `${d.deviceName} | ${d.id} | ${d.userPrincipalName || "(none)"} | ${d.operatingSystem} ${d.osVersion} | ${d.complianceState}`;
+}
+
+export async function searchDevicesInternal(
+  graph: GraphClient,
+  query: string,
+  limit: number,
+  exactMatch?: boolean
+): Promise<{ items: ManagedDevice[]; hasMore: boolean }> {
+  const sanitized = sanitizeSearchQuery(query);
+
+  const filters = [
+    `startsWith(deviceName,'${sanitized}')`,
+    `startsWith(userPrincipalName,'${sanitized}')`,
+    `serialNumber eq '${sanitized}'`,
+  ];
+
+  for (const filter of filters) {
+    const result = await graph.getAll<ManagedDevice>(
+      "/deviceManagement/managedDevices",
+      { $filter: filter, $select: DEVICE_SELECT },
+      { tool: "search_devices" },
+      limit
+    );
+    if (result.items.length > 0) return result;
+  }
+
+  if (exactMatch) {
+    return { items: [], hasMore: false };
+  }
+
+  const all = await graph.getAll<ManagedDevice>(
+    "/deviceManagement/managedDevices",
+    { $select: DEVICE_SELECT },
+    { tool: "search_devices" },
+    200
+  );
+
+  // Use the original query (not the OData-escaped `sanitized` value) for client-side
+  // matching — escaping doubles apostrophes, which breaks .includes() for names like
+  // "O'Brien" (see v1.3.1 fix for this same bug).
+  const lowerQ = query.toLowerCase();
+  const filtered = all.items.filter(
+    (d) =>
+      d.deviceName?.toLowerCase().includes(lowerQ) ||
+      d.userPrincipalName?.toLowerCase().includes(lowerQ) ||
+      d.serialNumber?.toLowerCase() === lowerQ
+  );
+
+  return {
+    items: filtered.slice(0, limit),
+    hasMore: filtered.length > limit,
+  };
+}
+
 export function registerDevicePropertyTools(
   server: McpServer,
   graph: GraphClient
@@ -98,12 +161,14 @@ export function registerDevicePropertyTools(
         .describe(
           "OData $orderby expression, e.g. \"deviceName\" or \"lastSyncDateTime desc\""
         ),
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' = one line per item, 'full' (default) = all fields"),
       cursor: z
         .string()
         .optional()
         .describe("Pagination cursor from a previous response to retrieve the next page of results"),
     },
-    async ({ filter, top, orderby, cursor }) => {
+    async ({ filter, top, orderby, format, cursor }) => {
       try {
         const params: Record<string, string> = { $select: DEVICE_SELECT };
         if (filter) params.$filter = filter;
@@ -121,9 +186,9 @@ export function registerDevicePropertyTools(
           return textResult("No devices found matching the criteria.");
         }
 
-        const text = items.map(formatDevice).join("\n\n---\n\n");
+        const fmt = format === "compact" ? formatDeviceCompact : formatDevice;
         const header = paginationHeader(items.length, "device(s)", hasMore, nextCursor);
-        return textResult(header + text);
+        return textResult(header + formatList(items.map(fmt), format ?? "full"));
       } catch (err) {
         return errorResult(err);
       }
@@ -171,62 +236,21 @@ export function registerDevicePropertyTools(
         .boolean()
         .optional()
         .describe("If true, only use server-side OData filters (no client-side fallback). Faster in large tenants."),
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' = one line per item, 'full' (default) = all fields"),
     },
-    async ({ query, top, exactMatch }) => {
+    async ({ query, top, exactMatch, format }) => {
       try {
-        const escapedQuery = query.replace(/'/g, "''");
         const limit = top ?? 25;
-
-        const filters = [
-          `startsWith(deviceName,'${escapedQuery}')`,
-          `startsWith(userPrincipalName,'${escapedQuery}')`,
-          `serialNumber eq '${escapedQuery}'`,
-        ];
-
-        let items: ManagedDevice[] = [];
-        let hasMore = false;
-
-        for (const filter of filters) {
-          const result = await graph.getAll<ManagedDevice>(
-            "/deviceManagement/managedDevices",
-            { $filter: filter, $select: DEVICE_SELECT },
-            { tool: "search_devices" },
-            limit
-          );
-          if (result.items.length > 0) {
-            items = result.items;
-            hasMore = result.hasMore;
-            break;
-          }
-        }
-
-        if (items.length === 0 && !exactMatch) {
-          const all = await graph.getAll<ManagedDevice>(
-            "/deviceManagement/managedDevices",
-            { $select: DEVICE_SELECT },
-            { tool: "search_devices" },
-            200
-          );
-
-          const lowerQ = query.toLowerCase();
-          const filtered = all.items.filter(
-            (d) =>
-              d.deviceName?.toLowerCase().includes(lowerQ) ||
-              d.userPrincipalName?.toLowerCase().includes(lowerQ) ||
-              d.serialNumber?.toLowerCase() === lowerQ
-          );
-
-          items = filtered.slice(0, limit);
-          hasMore = filtered.length > limit;
-        }
+        const { items, hasMore } = await searchDevicesInternal(graph, query, limit, exactMatch);
 
         if (items.length === 0) {
           return textResult(`No devices found matching "${query}".`);
         }
 
-        const text = items.map(formatDevice).join("\n\n---\n\n");
+        const fmt = format === "compact" ? formatDeviceCompact : formatDevice;
         const header = `Found ${items.length} device(s) matching "${query}"${hasMore ? " (more available)" : ""}:\n\n`;
-        return textResult(header + text);
+        return textResult(header + formatList(items.map(fmt), format ?? "full"));
       } catch (err) {
         return errorResult(err);
       }
@@ -363,8 +387,11 @@ export function registerDevicePropertyTools(
   server.tool(
     "list_device_categories",
     "List all device categories configured in Intune. Useful for finding the category name or ID before assigning a category to a device.",
-    {},
-    async () => {
+    {
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' = one line per item, 'full' (default) = all fields"),
+    },
+    async ({ format }) => {
       try {
         const { items } = await graph.getAll<DeviceCategory>(
           "/deviceManagement/deviceCategories",
@@ -377,10 +404,12 @@ export function registerDevicePropertyTools(
           return textResult("No device categories are configured in this tenant.");
         }
 
-        const lines = items.map(
-          (c) => `${c.displayName}\n  ID: ${c.id}\n  Description: ${c.description || "(none)"}`
-        );
-        return textResult(`${items.length} device category(ies):\n\n${lines.join("\n\n")}`);
+        const fmtFull = (c: DeviceCategory) =>
+          `${c.displayName}\n  ID: ${c.id}\n  Description: ${c.description || "(none)"}`;
+        const fmtCompact = (c: DeviceCategory) =>
+          `${c.displayName} | ${c.id} | ${c.description || "(none)"}`;
+        const fmt = format === "compact" ? fmtCompact : fmtFull;
+        return textResult(`${items.length} device category(ies):\n\n${formatList(items.map(fmt), format ?? "full")}`);
       } catch (err) {
         return errorResult(err);
       }
@@ -461,7 +490,7 @@ export function registerDevicePropertyTools(
 
   // --- Destructive: delete_device ---
 
-  if (process.env.ENABLE_DESTRUCTIVE_ACTIONS !== "true") return;
+  if (!isDestructiveActionsEnabled()) return;
 
   server.tool(
     "delete_device",

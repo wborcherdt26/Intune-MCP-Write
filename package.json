@@ -1,6 +1,6 @@
 {
   "name": "intune-mcp-write",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "MCP server providing read-write access to Microsoft Intune device properties and group memberships via Graph API",
   "type": "module",
   "main": "dist/index.js",

@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
 import { GraphError } from "../graph.js";
-import { textResult, errorResult } from "./errors.js";
+import { textResult, errorResult, sanitizeSearchQuery, formatList } from "./shared.js";
 
 interface GraphUser {
   id: string;
@@ -39,6 +39,10 @@ function formatUser(u: GraphUser): string {
   ].join("\n");
 }
 
+export function formatUserCompact(u: GraphUser): string {
+  return `${u.displayName} | ${u.id} | ${u.userPrincipalName} | ${u.department || "(none)"}`;
+}
+
 export function registerUserOperationTools(
   server: McpServer,
   graph: GraphClient
@@ -61,10 +65,12 @@ export function registerUserOperationTools(
         .boolean()
         .optional()
         .describe("If true, only use server-side OData filters (no client-side fallback). Faster in large tenants."),
+      format: z.enum(["compact", "full"]).optional()
+        .describe("'compact' = one line per item, 'full' (default) = all fields"),
     },
-    async ({ query, top, exactMatch }) => {
+    async ({ query, top, exactMatch, format }) => {
       try {
-        const escapedQuery = query.replace(/'/g, "''");
+        const escapedQuery = sanitizeSearchQuery(query);
         const limit = top ?? 25;
 
         // Try startsWith on displayName first, then userPrincipalName
@@ -114,9 +120,9 @@ export function registerUserOperationTools(
           return textResult(`No users found matching "${query}".`);
         }
 
-        const text = items.map(formatUser).join("\n\n");
+        const fmt = format === "compact" ? formatUserCompact : formatUser;
         const header = `Found ${items.length} user(s) matching "${query}"${hasMore ? " (more available)" : ""}:\n\n`;
-        return textResult(header + text);
+        return textResult(header + formatList(items.map(fmt), format ?? "full"));
       } catch (err) {
         return errorResult(err);
       }

@@ -209,3 +209,135 @@ describe("remove_user_from_group", () => {
     expect(getText(result)).toContain("Not found");
   });
 });
+
+describe("search_groups", () => {
+  it("returns matching groups from server-side filter, full format by default", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.getAll.mockResolvedValueOnce({ items: [mockGroup], hasMore: false });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("search_groups");
+    const result = await handler({ query: "Test" });
+
+    expect(getText(result)).toContain("Description: A test group");
+    expect(graph.getAll).toHaveBeenCalledWith(
+      "/groups",
+      expect.objectContaining({ $filter: "startsWith(displayName,'Test')" }),
+      { tool: "search_groups" },
+      25
+    );
+  });
+
+  it("returns a compact one-liner per group when format is compact", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.getAll.mockResolvedValueOnce({ items: [mockGroup], hasMore: false });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("search_groups");
+    const result = await handler({ query: "Test", format: "compact" });
+
+    expect(getText(result)).toContain("Test Group | group-uuid-1 | Assigned");
+    expect(getText(result)).not.toContain("Description:");
+  });
+
+  it("matches names with apostrophes via the client-side fallback (v1.3.1 regression)", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    const apostropheGroup = { ...mockGroup, displayName: "O'Brien's Team" };
+    graph.getAll
+      .mockResolvedValueOnce({ items: [], hasMore: false }) // server-side startsWith filter
+      .mockResolvedValueOnce({ items: [apostropheGroup], hasMore: false }); // 200-item fallback
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("search_groups");
+    const result = await handler({ query: "O'Brien" });
+
+    expect(getText(result)).toContain("O'Brien's Team");
+  });
+});
+
+describe("list_group_members", () => {
+  const mockMember = {
+    "@odata.type": "#microsoft.graph.user",
+    id: "user-uuid-1",
+    displayName: "Alice Smith",
+    userPrincipalName: "alice@contoso.com",
+    accountEnabled: true,
+  };
+
+  it("defaults to a compact one-liner per member", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockGroup);
+    graph.getAll.mockResolvedValueOnce({ items: [mockMember], hasMore: false });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("list_group_members");
+    const result = await handler({ groupId: "group-uuid-1" });
+
+    expect(getText(result)).toContain("[User] Alice Smith (alice@contoso.com)");
+  });
+
+  it("adds account status and OS version when format is full", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockGroup);
+    graph.getAll.mockResolvedValueOnce({ items: [mockMember], hasMore: false });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("list_group_members");
+    const result = await handler({ groupId: "group-uuid-1", format: "full" });
+
+    expect(getText(result)).toContain("Account Enabled: true");
+  });
+});
+
+describe("list_device_groups", () => {
+  const mockAadDevice = {
+    id: "device-object-id-1",
+    displayName: "LAPTOP-TEST01",
+    deviceId: "aad-device-id-1",
+    operatingSystem: "Windows",
+    operatingSystemVersion: "10.0.19045",
+    accountEnabled: true,
+    trustType: "AzureAd",
+  };
+
+  it("lists the groups a device belongs to, full format by default", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get
+      .mockResolvedValueOnce(mockAadDevice) // resolveToObjectId's direct object-ID lookup
+      .mockResolvedValueOnce(mockAadDevice); // device fetch for the header
+    graph.getAll.mockResolvedValueOnce({
+      items: [{ ...mockGroup, "@odata.type": "#microsoft.graph.group" }],
+      hasMore: false,
+    });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("list_device_groups");
+    const result = await handler({ deviceId: "device-object-id-1" });
+
+    expect(getText(result)).toContain("Description: A test group");
+  });
+
+  it("returns a compact one-liner per group when format is compact", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get
+      .mockResolvedValueOnce(mockAadDevice)
+      .mockResolvedValueOnce(mockAadDevice);
+    graph.getAll.mockResolvedValueOnce({
+      items: [{ ...mockGroup, "@odata.type": "#microsoft.graph.group" }],
+      hasMore: false,
+    });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("list_device_groups");
+    const result = await handler({ deviceId: "device-object-id-1", format: "compact" });
+
+    expect(getText(result)).toContain("Test Group | group-uuid-1 | Assigned");
+  });
+});

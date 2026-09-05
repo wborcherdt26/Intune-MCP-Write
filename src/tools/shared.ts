@@ -25,9 +25,25 @@ export function paginationHeader(count: number, label: string, hasMore: boolean,
   return `${count} ${label}${more}:${cursor}\n`;
 }
 
+export function sanitizeSearchQuery(query: string): string {
+  const cleaned = query.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 255);
+  return cleaned.replace(/'/g, "''");
+}
+
 export function odataTypeLabel(
-  odataType: string,
+  odataType: string | undefined,
   labels: Record<string, string>
 ): string {
+  if (!odataType) return "Unknown";
   return labels[odataType] ?? odataType.replace("#microsoft.graph.", "");
+}
+
+export type ResponseFormat = "compact" | "full";
+
+export function formatList(items: string[], format: ResponseFormat): string {
+  return items.join(format === "compact" ? "\n" : "\n\n---\n\n");
+}
+
+export function isDestructiveActionsEnabled(): boolean {
+  return process.env.ENABLE_DESTRUCTIVE_ACTIONS === "true";
 }

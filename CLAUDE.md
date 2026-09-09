@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Branch note:** This is the `feature/token-efficiency-compact-format` working branch (package version `1.5.0`). Relative to `master` it renames `tools/errors.ts` → `tools/shared.ts` (and centralizes the destructive-action gate there), adds a **compact response format**, and adds a **compound "overview" tools** module. Sections marked _(this branch)_ describe work not yet on `master`.
+> **Branch note:** This is the `feature/token-efficiency-compact-format` working branch (package version `1.6.0`). Relative to `master` it renames `tools/errors.ts` → `tools/shared.ts` (and centralizes the destructive-action gate there), adds a **compact response format**, a **compound "overview" tools** module, and _(v1.6.0)_ a **guarded generic passthrough** (`intune_graph_get`). Sections marked _(this branch)_ describe work not yet on `master`.
 
 ## Overview
 
@@ -58,6 +58,37 @@ Request flow: **MCP client → tool handler → `GraphClient` → Microsoft Grap
 ## Compound "overview" tools _(this branch)_
 
 `src/tools/compound.ts` (`registerCompoundTools`) bundles several Graph calls into one response to save round-trips and tokens: `get_device_overview`, `search_device_overview`, `get_group_overview`, `search_group_overview`. They **reuse exported internals** (`DEVICE_SELECT`, `formatDevice`, and search/format helpers) from the domain modules rather than reimplementing Graph calls — export a reusable helper from the domain module and import it here when a compound tool needs its behavior.
+
+## Generic passthrough _(v1.6.0)_
+
+`src/tools/generic.ts` (`registerGenericTools`, wired in **last** in `server.ts`) provides
+`intune_graph_get` — a guarded, **read-only** escape hatch for GET-ing an Intune Graph path when no
+curated tool fits. **Prefer a dedicated/compound tool whenever one exists**; the passthrough is a
+fallback, not the default.
+
+- **Read-only by construction.** The tool only calls `graph.get`/`getBeta`/`getAll`/`getAllBeta` —
+  it has no write verb and physically cannot POST/PATCH/DELETE even though this server's token holds
+  `*.ReadWrite.All`. The `confirmDeviceName` gates and `ENABLE_DESTRUCTIVE_ACTIONS` remain the only
+  write path. A generic `intune_graph_write` was deliberately deferred (own safety review). Do not
+  reuse this allowlist for a write verb without re-review — the read-only bound is method-based.
+- **Allowlist boundary:** `validateGraphPath(path)` in `shared.ts` permits `/deviceManagement`,
+  `/users`, `/groups`, and `/devices` (case-insensitive) and rejects absolute URLs, `..`, embedded
+  query strings, backslashes, and control chars. This is broader than the read repo (which allows
+  only `/deviceManagement` + `/users`) because this repo also holds `Device.Read.All`,
+  `Directory.Read.All`, and `GroupMember.ReadWrite.All`, and its curated tools already GET `/groups`
+  and `/devices` (see `group-membership.ts`). Still excludes `/servicePrincipals`,
+  `/directoryObjects`, `/organization`.
+- **`params` is the one place `sanitizeSearchQuery` is intentionally NOT applied.** The whole
+  `params` bag (including `$filter`) is passed to Graph verbatim — a documented, deliberate exception:
+  the model authors the OData, and the path allowlist + read-only surface bound the risk. On a
+  `list:true` call, `$top` in `params` is ignored — use the dedicated `top` param.
+- **Validation throws a plain `Error`, not `GraphError`** — `errorText` rewrites `GraphError`
+  messages by status code (403 → "Access denied…", plus 401/404/409), which would swallow the
+  guidance text; a plain `Error` surfaces the message verbatim while `errorResult` still sets
+  `isError`.
+- Rendering uses `formatGeneric(obj, format)` (compact = scalar fields on one line, full = pretty
+  JSON with `@odata.*` noise stripped). A single GET returning a `{ value: [...] }` collection
+  envelope nudges the caller toward `list:true`.
 
 ## Tool conventions
 

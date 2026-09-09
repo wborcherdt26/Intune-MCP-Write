@@ -4,6 +4,62 @@ Record of changes, decisions, and releases for the Intune Admin MCP Server (writ
 
 ---
 
+## 2026-09-09 — v1.6.0: Guarded Generic Passthrough (`intune_graph_get`)
+
+### Summary
+
+Ports the read server's v1.8.0 escape hatch to this write-capable repo: `intune_graph_get`
+performs a **read-only** GET against an allowlisted Intune Graph path when no curated tool fits.
+Purely additive — no existing tool behavior changes, and it registers **last** so the curated
+typed tools remain the preferred path. No new OAuth scopes.
+
+### New Tool
+
+- **`intune_graph_get`** — GET an allowed read-only Graph path with correct v1.0/beta routing,
+  single-vs-collection handling, pagination/cursor reuse, and a generic compact/full formatter.
+  Parameters: `path`, `params` (OData), `beta`, `list`, `top`, `format`, `cursor`. A single GET
+  that returns a `{ value: [...] }` collection envelope nudges the caller to re-call with
+  `list:true`.
+
+### Read-only by construction (the key safety decision)
+
+- **This tool only ever issues GET requests** (`graph.get`/`getBeta`/`getAll`/`getAllBeta`). It
+  has **no** generic write verb, so it cannot POST/PATCH/DELETE even though this server's token
+  holds `*.ReadWrite.All`. The per-tool `confirmDeviceName` gates and the
+  `ENABLE_DESTRUCTIVE_ACTIONS` env gate remain the **only** write path. A generic
+  `intune_graph_write` was explicitly **deferred** to a separate change with its own safety review.
+  The read-only bound is *method-based, not token-based* — do not reuse this allowlist for a write
+  verb without re-review.
+
+### Safety Boundary
+
+- **Allowlist: `/deviceManagement`, `/users`, `/groups`, and `/devices`.** Broader than the read
+  repo (`/deviceManagement` + `/users` only) because this server actually holds `Device.Read.All`,
+  `Directory.Read.All`, `GroupMember.ReadWrite.All`, and `User.Read.All`, and its curated tools
+  already GET `/groups/{id}`, `/groups/{id}/members`, `/devices/{id}`, and `/devices/{id}/memberOf`
+  for group membership and device-object resolution. Still no `/servicePrincipals`,
+  `/directoryObjects`, or `/organization`. The check (`validateGraphPath`) is case-insensitive and
+  also rejects absolute URLs, protocol-relative paths, `..` traversal, embedded query strings,
+  backslashes, and control characters. `/deviceManagement` is broader than any single granted
+  scope, so a few privileged sub-paths can still 403 at runtime — coverage, not a per-path guarantee.
+- **`params` is passed to Graph verbatim and is NOT sanitized** (incl. `$filter`) — a documented,
+  deliberate exception. The model authors the OData; `sanitizeSearchQuery` is intentionally not
+  applied here. The path allowlist plus the read-only (GET-only) surface bound the risk.
+- Validation failures throw a plain `Error` (not `GraphError`) so the guidance text reaches the
+  caller verbatim instead of being rewritten by `errorText`'s status-code mapping (401/403/404/409).
+
+### Tests
+
+- New `src/__tests__/generic.test.ts` (38 cases): `validateGraphPath` accept/reject matrix (incl.
+  the four-prefix accepts, mixed-case accept, and verbatim-message assertions), `intune_graph_get`
+  single/list/beta/cursor/empty/off-allowlist/error paths, and `formatGeneric` compact/full. Full
+  suite: **141 unit tests pass; build clean.**
+- `scripts/validate-live.mjs` extended: added `intune_graph_get` to its `READ_ONLY_ALLOWLIST`,
+  registered/captured `registerGenericTools`, and added single-GET, list-with-`$select`,
+  `/groups` list, and off-allowlist-refusal exercises.
+
+---
+
 ## 2026-09-05 — v1.5.0: Token Efficiency: Compact Format & Compound Operations
 
 ### Summary

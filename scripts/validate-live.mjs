@@ -25,12 +25,14 @@ import { registerDevicePropertyTools } from "../dist/tools/device-properties.js"
 import { registerGroupMembershipTools } from "../dist/tools/group-membership.js";
 import { registerUserOperationTools } from "../dist/tools/user-operations.js";
 import { registerCompoundTools } from "../dist/tools/compound.js";
+import { registerGenericTools } from "../dist/tools/generic.js";
 
 const READ_ONLY_ALLOWLIST = new Set([
   "list_devices", "get_device", "search_devices", "list_device_categories",
   "search_groups", "list_group_members", "resolve_device_object_id", "list_device_groups",
   "search_users",
   "get_device_overview", "search_device_overview", "get_group_overview", "search_group_overview",
+  "intune_graph_get", // read-only GET escape hatch (v1.6.0)
 ]);
 
 const results = [];
@@ -129,6 +131,7 @@ const deviceProps = captureHandlers(registerDevicePropertyTools, graph);
 const groups = captureHandlers(registerGroupMembershipTools, graph);
 const users = captureHandlers(registerUserOperationTools, graph);
 const compound = captureHandlers(registerCompoundTools, graph);
+const generic = captureHandlers(registerGenericTools, graph);
 
 let deviceId, deviceUpn, groupId;
 
@@ -201,6 +204,43 @@ if (groupId) {
 } else {
   skip("get_group_overview", "no group ID from search_groups");
   skip("search_group_overview", "no group ID from search_groups");
+}
+
+// ── Generic passthrough (intune_graph_get) ──────────────────
+
+console.log("\nGeneric passthrough:");
+
+// Single GET — a small, always-present Intune resource.
+await call(generic, "intune_graph_get",
+  { path: "/deviceManagement/managedDeviceOverview" },
+  (t) => `single GET → ${firstLine(t, 120)}`);
+
+// List with $select + list:true (paginates & formats items).
+await call(generic, "intune_graph_get",
+  { path: "/deviceManagement/managedDevices", list: true, top: 3, format: "compact", params: { $select: "id,deviceName" } },
+  (t) => firstLine(t, 120));
+
+// Wider allowlist — /groups is covered by this repo's scopes (not the read repo's).
+await call(generic, "intune_graph_get",
+  { path: "/groups", list: true, top: 3, format: "compact", params: { $select: "id,displayName" } },
+  (t) => firstLine(t, 120));
+
+// Negative check: an off-allowlist path must be refused BEFORE any Graph call,
+// with the verbatim "only covers" guidance (proving it isn't rewritten to "Access denied").
+// call() would report isError as a FAIL, so assert this one directly.
+{
+  const tool = "intune_graph_get (off-allowlist guard)";
+  try {
+    const result = await generic.get("intune_graph_get")({ path: "/servicePrincipals" });
+    const text = result.content?.[0]?.text ?? "";
+    if (result.isError && text.includes("only covers") && !text.includes("Access denied")) {
+      ok(tool, "off-allowlist path refused with verbatim guidance");
+    } else {
+      fail(tool, `expected verbatim 'only covers' guidance, got: ${firstLine(text, 200)}`);
+    }
+  } catch (err) {
+    fail(tool, err.stack ?? err);
+  }
 }
 
 // ── Summary ─────────────────────────────────────────────────

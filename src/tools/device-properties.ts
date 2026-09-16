@@ -91,21 +91,19 @@ export async function searchDevicesInternal(
 ): Promise<{ items: ManagedDevice[]; hasMore: boolean }> {
   const sanitized = sanitizeSearchQuery(query);
 
-  const filters = [
+  const combinedFilter = [
     `startsWith(deviceName,'${sanitized}')`,
     `startsWith(userPrincipalName,'${sanitized}')`,
     `serialNumber eq '${sanitized}'`,
-  ];
+  ].join(" or ");
 
-  for (const filter of filters) {
-    const result = await graph.getAll<ManagedDevice>(
-      "/deviceManagement/managedDevices",
-      { $filter: filter, $select: DEVICE_SELECT },
-      { tool: "search_devices" },
-      limit
-    );
-    if (result.items.length > 0) return result;
-  }
+  const result = await graph.getAll<ManagedDevice>(
+    "/deviceManagement/managedDevices",
+    { $filter: combinedFilter, $select: DEVICE_SELECT },
+    { tool: "search_devices" },
+    limit
+  );
+  if (result.items.length > 0) return result;
 
   if (exactMatch) {
     return { items: [], hasMore: false };
@@ -513,12 +511,15 @@ export function registerDevicePropertyTools(
         );
 
         if (device.deviceName !== confirmDeviceName) {
-          return textResult(
-            `Safety check failed — device name does not match.\n` +
-            `  Expected: "${confirmDeviceName}"\n` +
-            `  Actual: "${device.deviceName}"\n` +
-            `  Fetch the device details first and use the exact device name.`
-          );
+          return {
+            ...textResult(
+              `Safety check failed — device name does not match.\n` +
+              `  Expected: "${confirmDeviceName}"\n` +
+              `  Actual: "${device.deviceName}"\n` +
+              `  Fetch the device details first and use the exact device name.`
+            ),
+            isError: true as const,
+          };
         }
 
         await graph.delete(

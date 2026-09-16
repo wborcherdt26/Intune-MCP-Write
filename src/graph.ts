@@ -4,6 +4,12 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const RETRYABLE_STATUS_CODES = new Set([401, 429, 500, 502, 503, 504]);
+// Writes (POST/PATCH/PUT/DELETE) are not idempotent — a 5xx or network/timeout error
+// gives no guarantee the request didn't already apply server-side, so retrying it can
+// double-apply a change. Only retry writes for cases where we know nothing was applied:
+// an expired token (401, refreshed before the retry) or a request Graph rejected outright
+// before processing it (429).
+const WRITE_RETRYABLE_STATUS_CODES = new Set([401, 429]);
 const MAX_PAGE_SIZE = 100;
 const MAX_PAGES = 10;
 
@@ -182,6 +188,7 @@ export class GraphClient {
     let token = await this.getToken();
     const startTime = Date.now();
     let lastError: GraphError | undefined;
+    const isIdempotent = method === "GET";
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -229,7 +236,7 @@ export class GraphClient {
           ? `Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
           : err instanceof Error ? err.message : "Network error";
         lastError = new GraphError(0, message);
-        if (attempt === MAX_RETRIES) {
+        if (!isIdempotent || attempt === MAX_RETRIES) {
           const durationMs = Date.now() - startTime;
           logger.error("graph_request", {
             actor: this.getActor(),
@@ -277,7 +284,8 @@ export class GraphClient {
       const retryAfter = parseRetryAfter(response.headers.get("Retry-After"));
       lastError = new GraphError(response.status, message, retryAfter);
 
-      if (!RETRYABLE_STATUS_CODES.has(response.status) || attempt === MAX_RETRIES) {
+      const retryableStatusCodes = isIdempotent ? RETRYABLE_STATUS_CODES : WRITE_RETRYABLE_STATUS_CODES;
+      if (!retryableStatusCodes.has(response.status) || attempt === MAX_RETRIES) {
         const durationMs = Date.now() - startTime;
         logger.error("graph_request", {
           actor: this.getActor(),

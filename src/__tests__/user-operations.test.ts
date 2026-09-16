@@ -82,6 +82,31 @@ describe("search_users", () => {
     );
   });
 
+  it("defaults to full format with all fields", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.getAll.mockResolvedValueOnce({ items: [mockUser], hasMore: false });
+    registerUserOperationTools(server as never, graph as never);
+
+    const handler = server.getHandler("search_users");
+    const result = await handler({ query: "Alice" });
+
+    expect(getText(result)).toContain("Job Title: Engineer");
+  });
+
+  it("returns a compact one-liner per user when format is compact", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.getAll.mockResolvedValueOnce({ items: [mockUser], hasMore: false });
+    registerUserOperationTools(server as never, graph as never);
+
+    const handler = server.getHandler("search_users");
+    const result = await handler({ query: "Alice", format: "compact" });
+
+    expect(getText(result)).toContain("Alice Smith | user-uuid-1 | alice@contoso.com | IT");
+    expect(getText(result)).not.toContain("Job Title:");
+  });
+
   it("falls back to UPN filter when displayName returns nothing", async () => {
     const server = createMockServer();
     const graph = createMockGraph();

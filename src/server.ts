@@ -5,6 +5,8 @@ import { registerGroupMembershipTools } from "./tools/group-membership.js";
 import { registerRemoteActionTools } from "./tools/remote-actions.js";
 import { registerUserOperationTools } from "./tools/user-operations.js";
 import { registerBulkOperationTools } from "./tools/bulk-operations.js";
+import { registerCompoundTools } from "./tools/compound.js";
+import { registerGenericTools } from "./tools/generic.js";
 
 export interface PackageInfo {
   name: string;
@@ -49,6 +51,8 @@ export function createMcpServer(pkg: PackageInfo, auth: AuthContext): McpServer 
   registerRemoteActionTools(server, graph);
   registerUserOperationTools(server, graph);
   registerBulkOperationTools(server, graph);
+  registerCompoundTools(server, graph);
+  registerGenericTools(server, graph); // last: generic fallback after all curated tools
 
   return server;
 }

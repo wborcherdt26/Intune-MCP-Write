@@ -5,7 +5,9 @@ import {
   textResult,
   errorResult,
   odataTypeLabel,
-} from "../tools/errors.js";
+  sanitizeSearchQuery,
+  formatList,
+} from "../tools/shared.js";
 
 describe("errorText", () => {
   it("returns auth message for 401", () => {
@@ -60,5 +62,34 @@ describe("odataTypeLabel", () => {
 
   it("strips prefix for unknown type", () => {
     expect(odataTypeLabel("#microsoft.graph.unknownType", labels)).toBe("unknownType");
+  });
+
+  it("returns 'Unknown' for undefined input instead of throwing", () => {
+    expect(odataTypeLabel(undefined, labels)).toBe("Unknown");
+  });
+});
+
+describe("sanitizeSearchQuery", () => {
+  it("doubles single quotes for OData filter safety", () => {
+    expect(sanitizeSearchQuery("O'Brien")).toBe("O''Brien");
+  });
+
+  it("strips control characters", () => {
+    expect(sanitizeSearchQuery("abc\x00\x1fdef")).toBe("abcdef");
+  });
+
+  it("caps length at 255 characters", () => {
+    const long = "a".repeat(300);
+    expect(sanitizeSearchQuery(long).length).toBe(255);
+  });
+});
+
+describe("formatList", () => {
+  it("joins with a single newline in compact format", () => {
+    expect(formatList(["a", "b"], "compact")).toBe("a\nb");
+  });
+
+  it("joins with a separator in full format", () => {
+    expect(formatList(["a", "b"], "full")).toBe("a\n\n---\n\nb");
   });
 });

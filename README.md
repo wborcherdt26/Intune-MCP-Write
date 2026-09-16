@@ -150,6 +150,17 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 
 > Bulk operations run sequentially with a configurable delay (default 200ms) between API calls to avoid Graph API rate limits. Each returns per-item success/failure status.
 
+### Compound Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_device_overview` | Device details + resolved Azure AD object ID + group memberships in one call |
+| `search_device_overview` | Search for a device; auto-expands to a full overview on exactly one match |
+| `get_group_overview` | Group metadata + members in one call |
+| `search_group_overview` | Search for a group; auto-expands to a full overview on exactly one match |
+
+> `list_devices`, `search_devices`, `list_device_categories`, `search_groups`, `list_group_members`, `list_device_groups`, `search_users`, and the compound tools above all accept an optional `format: "compact"|"full"` parameter — `"compact"` returns one line per item, `"full"` returns every field. Compound tools default to `"compact"`; the rest default to `"full"` (`list_group_members` defaults to `"compact"`).
+
 ## Architecture
 
 - **Dual transport:** Supports stdio (for direct MCP client integration) and HTTP/Streamable (Express-based with session management)
@@ -174,15 +185,21 @@ src/
     remote-actions.ts     Remote device actions (restart, lock, wipe, retire)
     user-operations.ts    User search and primary user management
     bulk-operations.ts    Bulk sync, rename, and group add tools
-    errors.ts             Error formatting helpers
+    compound.ts           Compound overview tools (device/group overview + search-and-expand)
+    shared.ts             Error formatting, compact/full formatting, and shared helpers
   __tests__/
     graph.test.ts         GraphClient unit tests
-    errors.test.ts        Error helper unit tests
+    shared.test.ts        Shared helper unit tests (errors, format, sanitization)
+    device-properties.test.ts  list_devices/search_devices tool tests
+    device-properties-extended.test.ts  Category, delete tool tests
+    group-membership.test.ts  Group read/write tool tests
     remote-actions.test.ts  Remote action tool tests
     user-operations.test.ts  User operation tool tests
-    device-properties-extended.test.ts  Category, delete tool tests
-    group-membership.test.ts  User group operation tool tests
     bulk-operations.test.ts   Bulk operation tool tests
+    compound.test.ts      Compound overview tool tests
+scripts/
+  validate-live.mjs       Read-only live validation against a real tenant
+  validate-mcp-client.mjs End-to-end MCP client test (spawns the server over stdio)
 ```
 
 ## Known Limitations

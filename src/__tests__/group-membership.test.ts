@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { registerGroupMembershipTools } from "../tools/group-membership.js";
 import { GraphError } from "../graph.js";
 
@@ -339,5 +339,327 @@ describe("list_device_groups", () => {
     const result = await handler({ deviceId: "device-object-id-1", format: "compact" });
 
     expect(getText(result)).toContain("Test Group | group-uuid-1 | Assigned");
+  });
+});
+
+// A dynamic group shaped like the production Dutchie SSO groups.
+const mockRuleGroup = {
+  ...mockGroup,
+  id: "rule-group-uuid",
+  displayName: "App - Dutchie.SSO.Remote.1.Users",
+  groupTypes: ["DynamicMembership"],
+  membershipRule:
+    '(user.accountEnabled -eq true) and (user.jobTitle -in ["Accountant","Manager, Area"])',
+  membershipRuleProcessingState: "On",
+};
+
+describe("rule-editing tools — destructive gate", () => {
+  afterEach(() => {
+    delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
+  });
+
+  it("does not register when ENABLE_DESTRUCTIVE_ACTIONS is not 'true'", () => {
+    delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
+    const server = createMockServer();
+    const graph = createMockGraph();
+    registerGroupMembershipTools(server as never, graph as never);
+
+    expect(() => server.getHandler("update_group_membership_rule")).toThrow();
+    expect(() => server.getHandler("modify_membership_rule_value")).toThrow();
+  });
+
+  it("registers both tools when the flag is enabled", () => {
+    process.env.ENABLE_DESTRUCTIVE_ACTIONS = "true";
+    const server = createMockServer();
+    const graph = createMockGraph();
+    registerGroupMembershipTools(server as never, graph as never);
+
+    expect(server.getHandler("update_group_membership_rule")).toBeTypeOf("function");
+    expect(server.getHandler("modify_membership_rule_value")).toBeTypeOf("function");
+  });
+});
+
+describe("update_group_membership_rule", () => {
+  beforeEach(() => {
+    process.env.ENABLE_DESTRUCTIVE_ACTIONS = "true";
+  });
+  afterEach(() => {
+    delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
+  });
+
+  const NEW_RULE = '(user.accountEnabled -eq true) and (user.jobTitle -in ["Accountant"])';
+
+  it("previews without writing by default (dryRun defaults to true)", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: NEW_RULE,
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(getText(result)).toContain("DRY RUN");
+    expect(getText(result)).toContain("--- New rule ---");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("applies the new rule when dryRun is false and the name matches", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: NEW_RULE,
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(getText(result)).toContain("Membership rule updated");
+    expect(graph.patch).toHaveBeenCalledWith(
+      "/groups/rule-group-uuid",
+      { membershipRule: NEW_RULE },
+      { tool: "update_group_membership_rule" }
+    );
+  });
+
+  it("includes processingState in the patch body when supplied", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: NEW_RULE,
+      processingState: "Paused",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(graph.patch).toHaveBeenCalledWith(
+      "/groups/rule-group-uuid",
+      { membershipRule: NEW_RULE, membershipRuleProcessingState: "Paused" },
+      { tool: "update_group_membership_rule" }
+    );
+  });
+
+  it("rejects a name-confirmation mismatch without writing", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: NEW_RULE,
+      confirmGroupName: "Wrong Name",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(getText(result)).toContain("Safety check failed");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("refuses to edit an assigned (non-dynamic) group", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "group-uuid-1",
+      membershipRule: NEW_RULE,
+      confirmGroupName: "Test Group",
+      dryRun: false,
+    });
+
+    expect(getText(result)).toContain("not a dynamic group");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a rule that exceeds the 3072-character limit", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: "x".repeat(3100),
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(getText(result)).toContain("exceeding Entra's 3072");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("gives a Group.ReadWrite.All-specific message on 403", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    graph.patch.mockRejectedValueOnce(new GraphError(403, "Insufficient privileges"));
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: NEW_RULE,
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getText(result)).toContain("Group.ReadWrite.All");
+  });
+
+  it("warns when processing state is Paused", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce({ ...mockRuleGroup, membershipRuleProcessingState: "Paused" });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_group_membership_rule");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      membershipRule: NEW_RULE,
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+    });
+
+    expect(getText(result)).toContain("Paused");
+  });
+});
+
+describe("modify_membership_rule_value", () => {
+  beforeEach(() => {
+    process.env.ENABLE_DESTRUCTIVE_ACTIONS = "true";
+  });
+  afterEach(() => {
+    delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
+  });
+
+  it("adds a job title and patches the updated rule", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "add",
+      value: "Manager, Dual District",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(getText(result)).toContain("Membership rule updated");
+    expect(graph.patch).toHaveBeenCalledWith(
+      "/groups/rule-group-uuid",
+      {
+        membershipRule:
+          '(user.accountEnabled -eq true) and (user.jobTitle -in ["Accountant","Manager, Area","Manager, Dual District"])',
+      },
+      { tool: "modify_membership_rule_value" }
+    );
+  });
+
+  it("previews by default without writing and shows the list-size delta", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "add",
+      value: "Buyer",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+    });
+
+    expect(getText(result)).toContain("DRY RUN");
+    expect(getText(result)).toContain("List size: 2 → 3");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when adding a value that already exists", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "add",
+      value: "Accountant",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(getText(result)).toContain("No change");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("refuses (no write) when the clause can't be safely parsed", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce({
+      ...mockRuleGroup,
+      membershipRule: 'user.jobTitle -in ["Accountant", foo]',
+    });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "add",
+      value: "Buyer",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(getText(result)).toContain("Cannot edit the rule");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a name-confirmation mismatch", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "add",
+      value: "Buyer",
+      confirmGroupName: "Nope",
+      dryRun: false,
+    });
+
+    expect(getText(result)).toContain("Safety check failed");
+    expect(graph.patch).not.toHaveBeenCalled();
   });
 });

@@ -12,6 +12,10 @@ const SCOPES = [
   "DeviceManagementManagedDevices.PrivilegedOperations.All",
   "Device.Read.All",
   "GroupMember.ReadWrite.All",
+  // Group.ReadWrite.All is required to edit a dynamic group's membershipRule
+  // (GroupMember.ReadWrite.All only covers adding/removing members, not group
+  // properties). Needed by update_group_membership_rule / modify_membership_rule_value.
+  "Group.ReadWrite.All",
   "Directory.Read.All",
   "User.Read.All",
 ];

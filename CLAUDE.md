@@ -75,9 +75,9 @@ fallback, not the default.
   `/users`, `/groups`, and `/devices` (case-insensitive) and rejects absolute URLs, `..`, embedded
   query strings, backslashes, and control chars. This is broader than the read repo (which allows
   only `/deviceManagement` + `/users`) because this repo also holds `Device.Read.All`,
-  `Directory.Read.All`, and `GroupMember.ReadWrite.All`, and its curated tools already GET `/groups`
-  and `/devices` (see `group-membership.ts`). Still excludes `/servicePrincipals`,
-  `/directoryObjects`, `/organization`.
+  `Directory.Read.All`, `GroupMember.ReadWrite.All`, and `Group.ReadWrite.All`, and its curated
+  tools already GET `/groups` and `/devices` and PATCH group `membershipRule`s (see
+  `group-membership.ts`). Still excludes `/servicePrincipals`, `/directoryObjects`, `/organization`.
 - **`params` is the one place `sanitizeSearchQuery` is intentionally NOT applied.** The whole
   `params` bag (including `$filter`) is passed to Graph verbatim — a documented, deliberate exception:
   the model authors the OData, and the path allowlist + read-only surface bound the risk. On a
@@ -99,7 +99,8 @@ Follow the existing pattern when adding or editing tools:
 - For list output, render items via `formatList(items.map(fmt), format ?? "full")` (see compact-format section).
 - Device notes use the **beta** API (`patchBeta`); most other reads/writes use `v1.0`.
 - **Group `$ref` operations resolve IDs first.** An Intune managed device ID is not the directory object ID needed for group membership. See `resolve_device_object_id` and the resolution helper in [group-membership.ts](src/tools/group-membership.ts): managed device → `azureADDeviceId` → directory `deviceId` filter → object ID. Adds use `put(...$ref, { "@odata.id": ".../directoryObjects/<id>" })`.
-- **Destructive actions** are registered **only when `isDestructiveActionsEnabled()`** _(this branch; reads `ENABLE_DESTRUCTIVE_ACTIONS === "true"`, centralized in [shared.ts](src/tools/shared.ts))_. An early `return` skips registration otherwise: `retire_device` and `wipe_device` are gated in [remote-actions.ts](src/tools/remote-actions.ts), and `delete_device` is gated separately at the end of [device-properties.ts](src/tools/device-properties.ts). Each requires a `confirmDeviceName` parameter that must exactly match the fetched device's `deviceName`, or the handler returns early (a plain `textResult` explaining the mismatch) without issuing the Graph write.
+- **Destructive actions** are registered **only when `isDestructiveActionsEnabled()`** _(this branch; reads `ENABLE_DESTRUCTIVE_ACTIONS === "true"`, centralized in [shared.ts](src/tools/shared.ts))_. An early `return` skips registration otherwise: `retire_device` and `wipe_device` are gated in [remote-actions.ts](src/tools/remote-actions.ts), `delete_device` is gated separately at the end of [device-properties.ts](src/tools/device-properties.ts), and the dynamic-rule editors `update_group_membership_rule` / `modify_membership_rule_value` are gated at the end of [group-membership.ts](src/tools/group-membership.ts). Each requires an exact-match confirmation parameter (`confirmDeviceName` / `confirmGroupName`), or the handler returns early (a plain `textResult` explaining the mismatch) without issuing the Graph write.
+- **Dynamic membership rule editing** _(v1.7.0)_ — `update_group_membership_rule` (full replacement) and `modify_membership_rule_value` (add/remove one value in an `attribute -in [...]` / `-notIn` clause) PATCH `/groups/{id}` `membershipRule`. The list-editing logic lives in the **Graph-free** [membership-rule.ts](src/tools/membership-rule.ts): it locates exactly one clause and edits only its bracketed list, splicing the rest of the rule back byte-for-byte. Its core safety rail is a **round-trip guard** — if `serialize(parse(list))` ≠ the original list (nested expressions, unquoted tokens, malformed quoting), it refuses to write and points the caller at the full-replacement tool. Both tools default to `dryRun=true` (preview only), require `Group.ReadWrite.All` + admin consent, and warn when `membershipRuleProcessingState` is `Paused` (a rule PATCH won't recompute membership). A 403 is specialized (`ruleWriteErrorResult`) to name the `Group.ReadWrite.All` requirement.
 - Bulk operations run **sequentially** with a throttle delay (default 200ms) between Graph calls and cap at 50 items — they do not use Graph `$batch`.
 
 ## Testing conventions

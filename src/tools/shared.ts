@@ -50,10 +50,13 @@ export function isDestructiveActionsEnabled(): boolean {
 
 // Allowlist for the intune_graph_get read-only escape hatch. Tracks this repo's
 // granted delegated scopes (DeviceManagement*.ReadWrite.All, Device.Read.All,
-// Directory.Read.All, GroupMember.ReadWrite.All, User.Read.All) — broader than the
-// read repo because this server also GETs /groups and /devices for group membership
-// and device-object resolution. The tool only ever issues GET requests, so it cannot
-// write even though the token could; that method boundary is the core safety argument.
+// Directory.Read.All, GroupMember.ReadWrite.All, Group.ReadWrite.All, User.Read.All) —
+// broader than the read repo because this server also GETs /groups and /devices for group
+// membership and device-object resolution, and PATCHes group membershipRules. The tool
+// only ever issues GET requests, so it cannot write even though the token could; that
+// method boundary is the core safety argument. NOTE: Group.ReadWrite.All grants the token
+// write access to ALL group properties tenant-wide — the method boundary protects this
+// escape hatch, but the rule-editing tools genuinely exercise that broader grant.
 // Lowercased on purpose — validateGraphPath compares against a lowercased copy of the path.
 const ALLOWED_PREFIXES = ["/devicemanagement", "/users", "/groups", "/devices"] as const;
 // Human-readable form for the rejection message (case is cosmetic; the server is case-insensitive).

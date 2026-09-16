@@ -1,7 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../graph.js";
-import { textResult, errorResult, sanitizeSearchQuery, formatList, odataTypeLabel } from "./shared.js";
+import { GraphError } from "../graph.js";
+import {
+  textResult,
+  errorResult,
+  sanitizeSearchQuery,
+  formatList,
+  odataTypeLabel,
+  isDestructiveActionsEnabled,
+} from "./shared.js";
+import { modifyListClauseValue, MEMBERSHIP_RULE_MAX_LENGTH } from "./membership-rule.js";
 
 export interface AadGroup {
   id: string;
@@ -277,6 +286,43 @@ export async function resolveToObjectId(
     `Could not resolve "${idValue}" to a directory object ID. ` +
     `Provide a valid directory object ID, Azure AD device ID, or Intune managed device ID.`
   );
+}
+
+/**
+ * Best-effort blast-radius indicator for rule edits: how many members the group has
+ * right now (i.e. under the current rule). Never throws — a rule edit should not fail
+ * just because the count could not be fetched.
+ */
+async function describeMemberCount(
+  graph: GraphClient,
+  groupId: string,
+  toolName: string
+): Promise<string> {
+  try {
+    const { items, hasMore } = await listGroupMembersInternal(graph, groupId, toolName, 500);
+    return hasMore ? `${items.length}+ (large group)` : `${items.length}`;
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
+ * Specialized error for the rule-editing tools: a 403 here almost always means the token
+ * lacks Group.ReadWrite.All (GroupMember.ReadWrite.All does NOT cover editing membershipRule).
+ * The generic errorText 403 message doesn't say that, so surface the specific remedy.
+ */
+function ruleWriteErrorResult(err: unknown) {
+  if (err instanceof GraphError && err.status === 403) {
+    return errorResult(
+      new Error(
+        "Access denied editing the group's membership rule. This requires the Group.ReadWrite.All " +
+          "delegated permission with admin consent (GroupMember.ReadWrite.All is NOT sufficient), plus a " +
+          "role such as Groups Administrator or Intune Administrator. If the scope was just added, re-run " +
+          "intune-mcp-write-auth so the cached token includes it."
+      )
+    );
+  }
+  return errorResult(err);
 }
 
 export function registerGroupMembershipTools(
@@ -595,6 +641,189 @@ export function registerGroupMembershipTools(
         );
       } catch (err) {
         return errorResult(err);
+      }
+    }
+  );
+
+  // --- Dynamic membership rule editing (gated by ENABLE_DESTRUCTIVE_ACTIONS) ---
+  // These change WHO belongs to a group: a rule PATCH triggers an async, tenant-wide
+  // membership recompute that can add or remove many users at once. Higher blast radius
+  // than delete_device (which touches one device), so they sit behind the destructive
+  // gate AND require confirmGroupName AND default to dryRun. Editing membershipRule needs
+  // the Group.ReadWrite.All delegated scope (GroupMember.ReadWrite.All is insufficient)
+  // plus admin consent — see ruleWriteErrorResult for the 403 remedy.
+
+  if (!isDestructiveActionsEnabled()) return;
+
+  server.tool(
+    "update_group_membership_rule",
+    "DESTRUCTIVE — Replace the entire dynamic membership rule of an Entra ID group. " +
+      "Triggers an async, tenant-wide membership recompute that can add/remove many users. " +
+      "Requires confirmGroupName to match the group's display name. Defaults to dryRun=true " +
+      "(preview only) — set dryRun=false to apply. Needs Group.ReadWrite.All + admin consent. " +
+      "WRITE OPERATION.",
+    {
+      groupId: z.string().uuid().describe("The Entra ID group ID (GUID)"),
+      membershipRule: z
+        .string()
+        .describe("The full new membership rule expression (replaces the current rule entirely)"),
+      processingState: z
+        .enum(["On", "Paused"])
+        .optional()
+        .describe("Optionally set the rule processing state. 'On' evaluates the rule; 'Paused' freezes membership."),
+      confirmGroupName: z
+        .string()
+        .describe("Must exactly match the group's display name — safety check."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("If true (default), preview the change without writing. Set false to apply."),
+    },
+    async ({ groupId, membershipRule, processingState, confirmGroupName, dryRun }) => {
+      try {
+        const isDry = dryRun ?? true;
+        const group = await fetchGroup(graph, groupId, "update_group_membership_rule");
+
+        if (!group.groupTypes?.includes("DynamicMembership")) {
+          return textResult(
+            `"${group.displayName}" is not a dynamic group — it has assigned membership, so there is no rule to edit. ` +
+            `Use add_user_to_group / add_device_to_group instead.`
+          );
+        }
+        if (group.displayName !== confirmGroupName) {
+          return textResult(
+            `Safety check failed — group name does not match.\n` +
+            `  Expected: "${confirmGroupName}"\n  Actual: "${group.displayName}"\n` +
+            `No changes were made. Re-run with confirmGroupName set to the exact display name.`
+          );
+        }
+        if (membershipRule.length > MEMBERSHIP_RULE_MAX_LENGTH) {
+          return textResult(
+            `New rule is ${membershipRule.length} characters, exceeding Entra's ${MEMBERSHIP_RULE_MAX_LENGTH}-character ` +
+            `limit for membershipRule. Shorten it before applying.`
+          );
+        }
+
+        const memberCount = await describeMemberCount(graph, groupId, "update_group_membership_rule");
+        const pausedWarning =
+          group.membershipRuleProcessingState === "Paused" && processingState !== "On"
+            ? `\n\n⚠ Processing state is Paused — changing the rule will NOT recompute membership until it is set to On.`
+            : "";
+
+        const header =
+          `Group: ${group.displayName} (${groupId})\n` +
+          `Current members: ${memberCount}\n` +
+          `Processing state: ${group.membershipRuleProcessingState ?? "(unknown)"}` +
+          `${processingState ? ` → ${processingState}` : ""}\n\n` +
+          `--- Current rule ---\n${group.membershipRule ?? "(none)"}\n\n` +
+          `--- New rule ---\n${membershipRule}${pausedWarning}`;
+
+        if (isDry) {
+          return textResult(`DRY RUN — no changes written.\n\n${header}\n\nRe-run with dryRun=false to apply.`);
+        }
+
+        const body: Record<string, unknown> = { membershipRule };
+        if (processingState) body.membershipRuleProcessingState = processingState;
+        await graph.patch(`/groups/${groupId}`, body, { tool: "update_group_membership_rule" });
+
+        return textResult(`Membership rule updated.\n\n${header}\n\nMembership will recompute asynchronously.`);
+      } catch (err) {
+        return ruleWriteErrorResult(err);
+      }
+    }
+  );
+
+  server.tool(
+    "modify_membership_rule_value",
+    "DESTRUCTIVE — Add or remove a single value in an 'attribute -in [...]' (or -notIn) list within a " +
+      "dynamic group's membership rule — e.g. add a job title to a jobTitle list. Edits only that list and " +
+      "leaves the rest of the rule untouched; refuses without writing if the clause can't be safely parsed. " +
+      "Triggers an async tenant-wide membership recompute. Requires confirmGroupName. Defaults to dryRun=true. " +
+      "Needs Group.ReadWrite.All + admin consent. WRITE OPERATION.",
+    {
+      groupId: z.string().uuid().describe("The Entra ID group ID (GUID)"),
+      attribute: z
+        .string()
+        .describe("The rule attribute whose list to edit, e.g. 'user.jobTitle' or 'user.department'"),
+      action: z.enum(["add", "remove"]).describe("Whether to add or remove the value"),
+      value: z
+        .string()
+        .describe("The value to add or remove, e.g. 'Manager, Dual District' (surrounding quotes optional)"),
+      operator: z
+        .enum(["-in", "-notIn"])
+        .optional()
+        .describe("The list operator to target (default '-in')"),
+      confirmGroupName: z
+        .string()
+        .describe("Must exactly match the group's display name — safety check."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("If true (default), preview the change without writing. Set false to apply."),
+    },
+    async ({ groupId, attribute, action, value, operator, confirmGroupName, dryRun }) => {
+      try {
+        const isDry = dryRun ?? true;
+        const op = operator ?? "-in";
+        const group = await fetchGroup(graph, groupId, "modify_membership_rule_value");
+
+        if (!group.groupTypes?.includes("DynamicMembership")) {
+          return textResult(`"${group.displayName}" is not a dynamic group — it has no membership rule to edit.`);
+        }
+        if (!group.membershipRule) {
+          return textResult(`"${group.displayName}" is dynamic but has no membership rule set.`);
+        }
+        if (group.displayName !== confirmGroupName) {
+          return textResult(
+            `Safety check failed — group name does not match.\n` +
+            `  Expected: "${confirmGroupName}"\n  Actual: "${group.displayName}"\nNo changes were made.`
+          );
+        }
+
+        const outcome = modifyListClauseValue(group.membershipRule, attribute, action, value, op);
+        if (!outcome.ok) {
+          return textResult(`Cannot edit the rule: ${outcome.reason}`);
+        }
+        if (!outcome.changed) {
+          const verb = action === "add" ? "already present in" : "not present in";
+          return textResult(
+            `No change — "${value}" is ${verb} the ${attribute} ${op} list (${outcome.previousCount} values). Nothing written.`
+          );
+        }
+        if (outcome.newRule.length > MEMBERSHIP_RULE_MAX_LENGTH) {
+          return textResult(
+            `The edit would make the rule ${outcome.newRule.length} characters, exceeding Entra's ` +
+            `${MEMBERSHIP_RULE_MAX_LENGTH}-character limit. Not applied.`
+          );
+        }
+
+        const memberCount = await describeMemberCount(graph, groupId, "modify_membership_rule_value");
+        const pausedWarning =
+          group.membershipRuleProcessingState === "Paused"
+            ? `\n\n⚠ Processing state is Paused — the change will NOT recompute membership until it is set to On.`
+            : "";
+
+        const header =
+          `Group: ${group.displayName} (${groupId})\n` +
+          `Current members: ${memberCount}\n` +
+          `Action: ${action} "${value}" (${attribute} ${op})\n` +
+          `List size: ${outcome.previousCount} → ${outcome.newCount}\n\n` +
+          `--- Current rule ---\n${group.membershipRule}\n\n` +
+          `--- New rule ---\n${outcome.newRule}${pausedWarning}`;
+
+        if (isDry) {
+          return textResult(`DRY RUN — no changes written.\n\n${header}\n\nRe-run with dryRun=false to apply.`);
+        }
+
+        await graph.patch(
+          `/groups/${groupId}`,
+          { membershipRule: outcome.newRule },
+          { tool: "modify_membership_rule_value" }
+        );
+
+        return textResult(`Membership rule updated.\n\n${header}\n\nMembership will recompute asynchronously.`);
+      } catch (err) {
+        return ruleWriteErrorResult(err);
       }
     }
   );

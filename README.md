@@ -17,12 +17,15 @@ Create a public client app in Entra ID with these delegated permissions:
 - `DeviceManagementManagedDevices.PrivilegedOperations.All`
 - `Device.Read.All`
 - `GroupMember.ReadWrite.All`
+- `Group.ReadWrite.All`
 - `Directory.Read.All`
 - `User.Read.All`
 
 Grant admin consent for all permissions.
 
 > **Warning:** `PrivilegedOperations.All` grants the ability to remotely wipe, retire, restart, and lock any managed device the authenticated user has Intune RBAC access to. Use Intune scope tags to limit which devices can be acted on.
+>
+> **Warning:** `Group.ReadWrite.All` is required to edit dynamic-group membership rules (`GroupMember.ReadWrite.All` only covers adding/removing members, not group properties). It grants the token write access to **all group properties tenant-wide** (rename, delete, ownership), even though the curated tools only PATCH `membershipRule`. Only add it if you need the rule-editing tools, and note they are additionally gated behind `ENABLE_DESTRUCTIVE_ACTIONS`.
 
 Then create `.env`:
 ```
@@ -30,7 +33,7 @@ AZURE_CLIENT_ID=<your-app-client-id>
 AZURE_TENANT_ID=<your-tenant-id>
 ```
 
-To enable destructive actions (retire, wipe), also set:
+To enable destructive actions (retire, wipe, delete, and dynamic-rule editing), also set:
 ```
 ENABLE_DESTRUCTIVE_ACTIONS=true
 ```
@@ -120,7 +123,7 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 | `retire_device` | **Destructive** — Remove company data, preserve personal data |
 | `wipe_device` | **Destructive** — Factory reset the device |
 
-> `retire_device`, `wipe_device`, and `delete_device` require `ENABLE_DESTRUCTIVE_ACTIONS=true` and a `confirmDeviceName` parameter that must match the device's actual display name.
+> `retire_device`, `wipe_device`, and `delete_device` require `ENABLE_DESTRUCTIVE_ACTIONS=true` and a `confirmDeviceName` parameter that must match the device's actual display name. The dynamic-rule editors (`update_group_membership_rule`, `modify_membership_rule_value`) are likewise gated behind `ENABLE_DESTRUCTIVE_ACTIONS=true` and take a matching `confirmGroupName`.
 
 ### Group Read Operations
 
@@ -139,6 +142,15 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 | `remove_device_from_group` | Remove a device from a group (auto-resolves device IDs) |
 | `add_user_to_group` | Add a user to an assigned-membership group (accepts UPN or user object ID) |
 | `remove_user_from_group` | Remove a user from a group (accepts UPN or user object ID) |
+
+### Dynamic Membership Rule Editing
+
+Gated behind `ENABLE_DESTRUCTIVE_ACTIONS=true`. Both require `Group.ReadWrite.All` + admin consent, take a `confirmGroupName` that must match the group's display name, and default to `dryRun=true` (preview only — set `dryRun=false` to apply). A rule change triggers an async, tenant-wide membership recompute.
+
+| Tool | Description |
+|------|-------------|
+| `update_group_membership_rule` | **Destructive** — Replace a dynamic group's entire membership rule (optionally set processing state On/Paused) |
+| `modify_membership_rule_value` | **Destructive** — Add or remove a single value in an `attribute -in [...]` / `-notIn` list (e.g. add a job title). Refuses without writing if the clause can't be safely parsed |
 
 ### Bulk Operations
 

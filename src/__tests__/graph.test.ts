@@ -156,6 +156,58 @@ describe("GraphClient", () => {
       expect(await promise).toEqual({ ok: true });
       expect(getToken).toHaveBeenCalledTimes(2);
     });
+
+    it("does not retry a POST on 503 (non-idempotent write, unknown server-side effect)", async () => {
+      const fetch = mockFetch([
+        { status: 503, body: { error: { message: "unavailable" } } },
+        { status: 200, body: { ok: true } },
+      ]);
+      vi.stubGlobal("fetch", fetch);
+
+      await expect(client.post("/test/action", {})).rejects.toThrow(GraphError);
+      expect(fetch).toHaveBeenCalledOnce();
+    });
+
+    it("does not retry a POST on a network/timeout error", async () => {
+      const fetch = vi.fn(async () => {
+        throw new Error("network down");
+      });
+      vi.stubGlobal("fetch", fetch);
+
+      await expect(client.post("/test/action", {})).rejects.toThrow(GraphError);
+      expect(fetch).toHaveBeenCalledOnce();
+    });
+
+    it("still retries a POST on 429 (rejected before processing)", async () => {
+      const fetch = mockFetch([
+        { status: 429, body: { error: { message: "throttled" } } },
+        { status: 200, body: { ok: true } },
+      ]);
+      vi.stubGlobal("fetch", fetch);
+
+      const promise = client.post("/test/action", {});
+      await vi.runAllTimersAsync();
+
+      expect(await promise).toEqual({ ok: true });
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("still refreshes token and retries a POST on 401", async () => {
+      getToken
+        .mockResolvedValueOnce("expired")
+        .mockResolvedValueOnce("fresh");
+      const fetch = mockFetch([
+        { status: 401, body: { error: { message: "unauthorized" } } },
+        { status: 200, body: { ok: true } },
+      ]);
+      vi.stubGlobal("fetch", fetch);
+
+      const promise = client.post("/test/action", {});
+      await vi.runAllTimersAsync();
+
+      expect(await promise).toEqual({ ok: true });
+      expect(getToken).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("pagination", () => {

@@ -194,11 +194,41 @@ export function registerUserOperationTools(
                 { tool: "update_primary_user" }
               );
             }
-            await graph.post(
-              `/deviceManagement/managedDevices/${deviceId}/users/$ref`,
-              refBody,
-              { tool: "update_primary_user" }
-            );
+            try {
+              await graph.post(
+                `/deviceManagement/managedDevices/${deviceId}/users/$ref`,
+                refBody,
+                { tool: "update_primary_user" }
+              );
+            } catch (retryErr) {
+              // The old primary user(s) were already deleted above — the device
+              // now has no primary user. Best-effort restore before surfacing
+              // the failure so we don't leave it worse off than before the call.
+              let restored = true;
+              for (const existing of currentUsers) {
+                try {
+                  await graph.post(
+                    `/deviceManagement/managedDevices/${deviceId}/users/$ref`,
+                    { "@odata.id": `https://graph.microsoft.com/v1.0/users/${existing.id}` },
+                    { tool: "update_primary_user" }
+                  );
+                } catch {
+                  restored = false;
+                }
+              }
+              return {
+                content: [{
+                  type: "text" as const,
+                  text:
+                    `Failed to set new primary user "${userUpn}" after removing the previous one.\n` +
+                    (restored
+                      ? `  The previous primary user (${previousUser}) has been restored.\n`
+                      : `  WARNING: The previous primary user could NOT be restored — this device may now have no primary user assigned. Manual intervention required.\n`) +
+                    `  Error: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+                }],
+                isError: true as const,
+              };
+            }
           } else {
             throw postErr;
           }

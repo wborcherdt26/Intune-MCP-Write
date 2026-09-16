@@ -223,4 +223,59 @@ describe("update_primary_user", () => {
     expect(graph.post).toHaveBeenCalledTimes(2);
     expect(getText(result)).toContain("Primary user updated successfully");
   });
+
+  it("restores the previous primary user when the post-409 retry POST fails", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get
+      .mockResolvedValueOnce(mockDevice)
+      .mockResolvedValueOnce(mockUser);
+    graph.getAll.mockResolvedValueOnce({
+      items: [{ id: "old-user-id", displayName: "Bob Jones", userPrincipalName: "bob@contoso.com" }],
+      hasMore: false,
+    });
+    graph.post
+      .mockRejectedValueOnce(new GraphError(409, "Conflict"))
+      .mockRejectedValueOnce(new GraphError(500, "Server error"))
+      .mockResolvedValueOnce(undefined);
+    graph.delete.mockResolvedValueOnce(undefined);
+    registerUserOperationTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_primary_user");
+    const result = await handler({ deviceId: "device-uuid-1", userUpn: "alice@contoso.com" });
+
+    expect(graph.post).toHaveBeenCalledTimes(3);
+    expect(graph.post).toHaveBeenNthCalledWith(
+      3,
+      "/deviceManagement/managedDevices/device-uuid-1/users/$ref",
+      { "@odata.id": "https://graph.microsoft.com/v1.0/users/old-user-id" },
+      { tool: "update_primary_user" }
+    );
+    expect(result.isError).toBe(true);
+    expect(getText(result)).toContain("has been restored");
+  });
+
+  it("warns when the previous primary user cannot be restored after a failed retry", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get
+      .mockResolvedValueOnce(mockDevice)
+      .mockResolvedValueOnce(mockUser);
+    graph.getAll.mockResolvedValueOnce({
+      items: [{ id: "old-user-id", displayName: "Bob Jones", userPrincipalName: "bob@contoso.com" }],
+      hasMore: false,
+    });
+    graph.post
+      .mockRejectedValueOnce(new GraphError(409, "Conflict"))
+      .mockRejectedValueOnce(new GraphError(500, "Server error"))
+      .mockRejectedValueOnce(new GraphError(500, "Server error"));
+    graph.delete.mockResolvedValueOnce(undefined);
+    registerUserOperationTools(server as never, graph as never);
+
+    const handler = server.getHandler("update_primary_user");
+    const result = await handler({ deviceId: "device-uuid-1", userUpn: "alice@contoso.com" });
+
+    expect(result.isError).toBe(true);
+    expect(getText(result)).toContain("could NOT be restored");
+  });
 });

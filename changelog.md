@@ -4,6 +4,54 @@ Record of changes, decisions, and releases for the Intune Admin MCP Server (writ
 
 ---
 
+## 2026-09-16 — v1.7.0: Dynamic Membership Rule Editing
+
+### Summary
+
+Adds the ability to edit Entra ID **dynamic group membership rules** — the motivating case
+was adding a job title (e.g. `Manager, Dual District`) to the `user.jobTitle -in [...]` lists of
+the Dutchie SSO groups without hand-pasting a ~90-item rule string. Two new tools PATCH
+`/groups/{id}` `membershipRule`. Both are gated behind `ENABLE_DESTRUCTIVE_ACTIONS`, require a
+`confirmGroupName` safety match, and default to `dryRun=true` (preview only).
+
+### New OAuth scope
+
+- **`Group.ReadWrite.All`** added to `SCOPES` in `auth.ts`. Editing `membershipRule` is a
+  group-**property** write; `GroupMember.ReadWrite.All` (member add/remove only) is insufficient.
+  **Requires admin consent on the app registration, then re-auth** (`intune-mcp-write-auth`) so the
+  cached token carries the new scope — until consent is granted the new tools return a specialized
+  403. Note this scope grants token-level write to all group properties tenant-wide; the curated
+  tools only PATCH `membershipRule`.
+
+### New tools _(gated by `ENABLE_DESTRUCTIVE_ACTIONS`)_
+
+- **`update_group_membership_rule`** — replace a dynamic group's entire rule; optional
+  `processingState` (On/Paused). Params: `groupId`, `membershipRule`, `processingState?`,
+  `confirmGroupName`, `dryRun?`.
+- **`modify_membership_rule_value`** — add/remove a single value in one `attribute -in [...]` /
+  `-notIn` clause. Params: `groupId`, `attribute`, `action` (add|remove), `value`, `operator?`,
+  `confirmGroupName`, `dryRun?`.
+
+### Design & safety
+
+- New **Graph-free** module `src/tools/membership-rule.ts` holds the list-editing logic: it locates
+  exactly one `attribute operator [ ... ]` clause and edits only its bracketed list, splicing the
+  rest of the rule back byte-for-byte. Handles values containing commas (`"Director,IT GRC"`),
+  quote-aware bracket matching, and case-insensitive idempotent add/remove.
+- **Round-trip guard** is the core rail: if `serialize(parse(list))` ≠ the original list (nested
+  expressions, unquoted tokens, malformed quoting, multiple/zero matching clauses), the tool
+  **refuses to write** and points at the full-replacement primitive — turning "silently corrupt a
+  90-item rule" into "safely decline".
+- Additional rails: `confirmGroupName` exact match, `dryRun=true` default with before→after preview
+  and current member count, `Paused` processing-state warning (a rule PATCH won't recompute a paused
+  group), 3072-char `membershipRule` length guard, an **empty-list guard** (refuses a `remove` that
+  would leave `attribute -in []`, which Entra rejects — points at the full-replacement tool instead),
+  and a `Group.ReadWrite.All`-specific 403 message.
+- **37 new tests** (19 parser unit tests in `membership-rule.test.ts`, 18 tool/gate tests in
+  `group-membership.test.ts`, covering the add/remove/-notIn/empty-list paths). Full suite: 178 passing.
+
+---
+
 ## 2026-09-09 — v1.6.0: Guarded Generic Passthrough (`intune_graph_get`)
 
 ### Summary

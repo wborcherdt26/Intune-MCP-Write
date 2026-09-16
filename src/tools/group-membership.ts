@@ -790,6 +790,12 @@ export function registerGroupMembershipTools(
             `No change — "${value}" is ${verb} the ${attribute} ${op} list (${outcome.previousCount} values). Nothing written.`
           );
         }
+        if (outcome.newCount === 0) {
+          return textResult(
+            `Removing "${value}" would leave the ${attribute} ${op} list empty, which Entra rejects as an ` +
+            `invalid rule. Not applied — use update_group_membership_rule to intentionally clear or replace the rule.`
+          );
+        }
         if (outcome.newRule.length > MEMBERSHIP_RULE_MAX_LENGTH) {
           return textResult(
             `The edit would make the rule ${outcome.newRule.length} characters, exceeding Entra's ` +

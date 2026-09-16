@@ -44,9 +44,11 @@ the Dutchie SSO groups without hand-pasting a ~90-item rule string. Two new tool
   90-item rule" into "safely decline".
 - Additional rails: `confirmGroupName` exact match, `dryRun=true` default with before→after preview
   and current member count, `Paused` processing-state warning (a rule PATCH won't recompute a paused
-  group), 3072-char `membershipRule` length guard, and a `Group.ReadWrite.All`-specific 403 message.
-- **34 new tests** (19 parser unit tests in `membership-rule.test.ts`, 15 tool/gate tests in
-  `group-membership.test.ts`). Full suite: 175 passing.
+  group), 3072-char `membershipRule` length guard, an **empty-list guard** (refuses a `remove` that
+  would leave `attribute -in []`, which Entra rejects — points at the full-replacement tool instead),
+  and a `Group.ReadWrite.All`-specific 403 message.
+- **37 new tests** (19 parser unit tests in `membership-rule.test.ts`, 18 tool/gate tests in
+  `group-membership.test.ts`, covering the add/remove/-notIn/empty-list paths). Full suite: 178 passing.
 
 ---
 

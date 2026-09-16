@@ -662,4 +662,81 @@ describe("modify_membership_rule_value", () => {
     expect(getText(result)).toContain("Safety check failed");
     expect(graph.patch).not.toHaveBeenCalled();
   });
+
+  it("removes a value and PATCHes the shortened rule", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce(mockRuleGroup);
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "remove",
+      value: "Manager, Area",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(getText(result)).toContain("Membership rule updated");
+    expect(graph.patch).toHaveBeenCalledWith(
+      "/groups/rule-group-uuid",
+      { membershipRule: '(user.accountEnabled -eq true) and (user.jobTitle -in ["Accountant"])' },
+      { tool: "modify_membership_rule_value" }
+    );
+  });
+
+  it("targets a -notIn clause when operator is supplied", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce({
+      ...mockRuleGroup,
+      membershipRule: 'user.department -notIn ["Sales","Legal"]',
+    });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.department",
+      action: "add",
+      value: "Finance",
+      operator: "-notIn",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(graph.patch).toHaveBeenCalledWith(
+      "/groups/rule-group-uuid",
+      { membershipRule: 'user.department -notIn ["Sales","Legal","Finance"]' },
+      { tool: "modify_membership_rule_value" }
+    );
+  });
+
+  it("refuses (no write) to remove the last value, which would leave an empty list", async () => {
+    const server = createMockServer();
+    const graph = createMockGraph();
+    graph.get.mockResolvedValueOnce({
+      ...mockRuleGroup,
+      membershipRule: '(user.jobTitle -in ["Accountant"])',
+    });
+    registerGroupMembershipTools(server as never, graph as never);
+
+    const handler = server.getHandler("modify_membership_rule_value");
+    const result = await handler({
+      groupId: "rule-group-uuid",
+      attribute: "user.jobTitle",
+      action: "remove",
+      value: "Accountant",
+      confirmGroupName: "App - Dutchie.SSO.Remote.1.Users",
+      dryRun: false,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(getText(result)).toContain("would leave the user.jobTitle -in list empty");
+    expect(graph.patch).not.toHaveBeenCalled();
+  });
 });

@@ -251,6 +251,7 @@ describe("delete_device", () => {
     });
 
     expect(getText(result)).toContain("Safety check failed");
+    expect(result.isError).toBe(true);
     expect(graph.delete).not.toHaveBeenCalled();
   });
 });

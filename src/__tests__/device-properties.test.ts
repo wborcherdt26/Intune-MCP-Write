@@ -113,7 +113,9 @@ describe("search_devices", () => {
     expect(getText(result)).toContain("Serial: SN12345");
     expect(graph.getAll).toHaveBeenCalledWith(
       "/deviceManagement/managedDevices",
-      expect.objectContaining({ $filter: "startsWith(deviceName,'LAPTOP-TEST01')" }),
+      expect.objectContaining({
+        $filter: "startsWith(deviceName,'LAPTOP-TEST01') or startsWith(userPrincipalName,'LAPTOP-TEST01') or serialNumber eq 'LAPTOP-TEST01'",
+      }),
       { tool: "search_devices" },
       25
     );
@@ -137,17 +139,14 @@ describe("search_devices", () => {
   it("skips client-side fallback when exactMatch is true", async () => {
     const server = createMockServer();
     const graph = createMockGraph();
-    graph.getAll
-      .mockResolvedValueOnce({ items: [], hasMore: false })
-      .mockResolvedValueOnce({ items: [], hasMore: false })
-      .mockResolvedValueOnce({ items: [], hasMore: false });
+    graph.getAll.mockResolvedValueOnce({ items: [], hasMore: false });
     delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
     registerDevicePropertyTools(server as never, graph as never);
 
     const handler = server.getHandler("search_devices");
     const result = await handler({ query: "nobody", exactMatch: true });
 
-    expect(graph.getAll).toHaveBeenCalledTimes(3);
+    expect(graph.getAll).toHaveBeenCalledTimes(1);
     expect(getText(result)).toContain("No devices found");
   });
 
@@ -156,9 +155,7 @@ describe("search_devices", () => {
     const graph = createMockGraph();
     const apostropheDevice = { ...mockDevice, deviceName: "O'Brien-Laptop" };
     graph.getAll
-      .mockResolvedValueOnce({ items: [], hasMore: false }) // deviceName filter
-      .mockResolvedValueOnce({ items: [], hasMore: false }) // userPrincipalName filter
-      .mockResolvedValueOnce({ items: [], hasMore: false }) // serialNumber filter
+      .mockResolvedValueOnce({ items: [], hasMore: false }) // combined OData filter
       .mockResolvedValueOnce({ items: [apostropheDevice], hasMore: false }); // 200-item fallback
     delete process.env.ENABLE_DESTRUCTIVE_ACTIONS;
     registerDevicePropertyTools(server as never, graph as never);

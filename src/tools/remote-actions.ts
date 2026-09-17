@@ -177,12 +177,15 @@ export function registerRemoteActionTools(
         );
 
         if (device.deviceName !== confirmDeviceName) {
-          return textResult(
-            `Safety check failed — device name does not match.\n` +
-            `  Expected: "${confirmDeviceName}"\n` +
-            `  Actual: "${device.deviceName}"\n` +
-            `  Fetch the device details first and use the exact device name.`
-          );
+          return {
+            ...textResult(
+              `Safety check failed — device name does not match.\n` +
+              `  Expected: "${confirmDeviceName}"\n` +
+              `  Actual: "${device.deviceName}"\n` +
+              `  Fetch the device details first and use the exact device name.`
+            ),
+            isError: true as const,
+          };
         }
 
         await graph.post(
@@ -232,12 +235,15 @@ export function registerRemoteActionTools(
         );
 
         if (device.deviceName !== confirmDeviceName) {
-          return textResult(
-            `Safety check failed — device name does not match.\n` +
-            `  Expected: "${confirmDeviceName}"\n` +
-            `  Actual: "${device.deviceName}"\n` +
-            `  Fetch the device details first and use the exact device name.`
-          );
+          return {
+            ...textResult(
+              `Safety check failed — device name does not match.\n` +
+              `  Expected: "${confirmDeviceName}"\n` +
+              `  Actual: "${device.deviceName}"\n` +
+              `  Fetch the device details first and use the exact device name.`
+            ),
+            isError: true as const,
+          };
         }
 
         const body: Record<string, boolean> = {};

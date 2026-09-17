@@ -255,6 +255,7 @@ describe("remote-actions", () => {
       expect(getText(result)).toContain("Safety check failed");
       expect(getText(result)).toContain("WRONG-NAME");
       expect(getText(result)).toContain("LAPTOP-TEST01");
+      expect(result.isError).toBe(true);
       expect(graph.post).not.toHaveBeenCalled();
     });
   });
@@ -334,6 +335,7 @@ describe("remote-actions", () => {
       });
 
       expect(getText(result)).toContain("Safety check failed");
+      expect(result.isError).toBe(true);
       expect(graph.post).not.toHaveBeenCalled();
     });
   });
